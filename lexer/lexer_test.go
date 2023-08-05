@@ -1,15 +1,16 @@
-package mtcl
+package lexer
 
 import (
 	"bytes"
 	"fmt"
 	"testing"
+
+	. "go.spiff.io/mtcl/token"
 )
 
 func TestInvalidTokenName(t *testing.T) {
 	const want = "invalid"
 	const tok32 = TokenKind(0xffffffff)
-	setlogf(t)
 	if got := tok32.String(); got != want {
 		t.Errorf("Token(%08x) = %q; want %q", tok32, got, want)
 	}
@@ -18,7 +19,7 @@ func TestInvalidTokenName(t *testing.T) {
 func wordCase(word string) tokenCase {
 	return tokenCase{
 		Token: Token{
-			Kind:  TWord,
+			Kind:  Word,
 			Raw:   []byte(word),
 			Value: word,
 		},
@@ -54,7 +55,7 @@ func checkToken(t *testing.T, prefix string, got, want Token) {
 		t.Errorf("%stok.Raw = %q; want %q", prefix, got.Raw, want.Raw)
 	}
 
-	if want.Kind == TComment && want.Value == "" {
+	if want.Kind == Comment && want.Value == "" {
 		// Ignore value.
 	} else if want.Value != got.Value {
 		t.Errorf("%stok.Value = %T(%#v); want %T(%#v)", prefix,
@@ -75,14 +76,13 @@ type tokenCase struct {
 // Common punctuation tokens
 var (
 	_error        = tokenCase{Err: true}
-	_ws           = tokenCase{Token: Token{Kind: TWhitespace}}
-	_nl           = tokenCase{Token: Token{Kind: TNewline, Raw: []byte{'\n'}}}
-	_cont         = tokenCase{Token: Token{Kind: TContinuation, Raw: []byte("\\\n")}}
-	_eof          = tokenCase{Token: Token{Kind: TEOF}}
-	_semicolon    = tokenCase{Token: Token{Kind: TSemicolon, Raw: []byte{';'}}}
-	_bracketopen  = tokenCase{Token: Token{Kind: TBracketOpen, Raw: []byte{'['}}}
-	_bracketclose = tokenCase{Token: Token{Kind: TBracketClose, Raw: []byte{']'}}}
-	_comment      = tokenCase{Token: Token{Kind: TComment}}
+	_ws           = tokenCase{Token: Token{Kind: Whitespace}}
+	_nl           = tokenCase{Token: Token{Kind: Stop, Raw: []byte{'\n'}}}
+	_eof          = tokenCase{Token: Token{Kind: EOF}}
+	_semicolon    = tokenCase{Token: Token{Kind: Stop, Raw: []byte{';'}}}
+	_bracketopen  = tokenCase{Token: Token{Kind: BracketOpen, Raw: []byte{'['}}}
+	_bracketclose = tokenCase{Token: Token{Kind: BracketClose, Raw: []byte{']'}}}
+	_comment      = tokenCase{Token: Token{Kind: Comment}}
 )
 
 type tokenSeq []tokenCase
@@ -130,33 +130,30 @@ type tokenSeqTest struct {
 
 func (tt *tokenSeqTest) Run(t *testing.T) {
 	t.Run(tt.Name, func(t *testing.T) {
-		setlogf(t)
 		tt.Seq.Run(t, tt.Input)
 	})
 }
 
 func TestComment(t *testing.T) {
-	setlogf(t)
 	tokenSeq{
-		{Token: Token{Kind: TComment, Raw: []byte("#")}},
-		{Token: Token{Kind: TNewline}},
-		{Token: Token{Kind: TComment, Raw: []byte("# foo bar baz"), Value: " foo bar baz"}},
-		{Token: Token{Kind: TNewline}},
-		{Token: Token{Kind: TComment, Raw: []byte("#foo bar baz"), Value: "foo bar baz"}},
+		{Token: Token{Kind: Comment, Raw: []byte("#")}},
+		{Token: Token{Kind: Stop}},
+		{Token: Token{Kind: Comment, Raw: []byte("# foo bar baz"), Value: " foo bar baz"}},
+		{Token: Token{Kind: Stop}},
+		{Token: Token{Kind: Comment, Raw: []byte("#foo bar baz"), Value: "foo bar baz"}},
 		_eof,
 	}.Run(t, "#\n# foo bar baz\n#foo bar baz")
 }
 
 func TestBareword(t *testing.T) {
-	setlogf(t)
 	tokenSeq{
 		{Token: Token{
-			Kind:  TWhitespace,
+			Kind:  Whitespace,
 			Start: Location{Name: "test.tcl", Offset: 0, Line: 1, Column: 1},
 			End:   Location{Name: "test.tcl", Offset: 1, Line: 1, Column: 2},
 		}},
 		{Token: Token{
-			Kind:  TWord,
+			Kind:  Word,
 			Raw:   []byte("\\.foo$bar#baz=quux"),
 			Start: Location{Name: "test.tcl", Offset: 1, Line: 1, Column: 2},
 			End:   Location{Name: "test.tcl", Offset: 19, Line: 1, Column: 20},
@@ -165,7 +162,7 @@ func TestBareword(t *testing.T) {
 		_nl,
 		_ws,
 		{Token: Token{
-			Kind:  TWord,
+			Kind:  Word,
 			Raw:   []byte("10.0.0.0/8"),
 			Start: Location{Name: "test.tcl", Offset: 21, Line: 2, Column: 2},
 			End:   Location{Name: "test.tcl", Offset: 31, Line: 2, Column: 12},
@@ -173,7 +170,7 @@ func TestBareword(t *testing.T) {
 		}},
 		_ws,
 		{Token: Token{
-			Kind:  TComment,
+			Kind:  Comment,
 			Raw:   []byte("# #f + -; // foo"),
 			Start: Location{Name: "test.tcl", Offset: 32, Line: 2, Column: 13},
 			End:   Location{Name: "test.tcl", Offset: 48, Line: 2, Column: 29},
@@ -182,7 +179,7 @@ func TestBareword(t *testing.T) {
 		_nl,
 		wordCase("word"),
 		_ws,
-		_cont,
+		_ws, // Continuation
 		wordCase("continued"), _nl,
 		_nl,
 		wordCase("foo"),
@@ -209,13 +206,12 @@ func TestBareword(t *testing.T) {
 }
 
 func TestWhitespace(t *testing.T) {
-	setlogf(t)
 	tokenSeq{
 		{
 			Token: Token{
 				Start: Location{Name: "test.tcl", Column: 1, Line: 1, Offset: 0},
 				End:   Location{Name: "test.tcl", Column: 2, Line: 1, Offset: 1},
-				Kind:  TWhitespace,
+				Kind:  Whitespace,
 				Raw:   []byte(" "),
 			},
 		},
@@ -223,7 +219,7 @@ func TestWhitespace(t *testing.T) {
 			Token: Token{
 				Start: Location{Name: "test.tcl", Column: 2, Line: 1, Offset: 1},
 				End:   Location{Name: "test.tcl", Column: 1, Line: 2, Offset: 2},
-				Kind:  TNewline,
+				Kind:  Stop,
 				Raw:   []byte{'\n'},
 			},
 		},
@@ -231,7 +227,7 @@ func TestWhitespace(t *testing.T) {
 			Token: Token{
 				Start: Location{Name: "test.tcl", Column: 1, Line: 2, Offset: 2},
 				End:   Location{Name: "test.tcl", Column: 2, Line: 2, Offset: 3},
-				Kind:  TWhitespace,
+				Kind:  Whitespace,
 				Raw:   []byte("\r"),
 			},
 		},
@@ -239,7 +235,7 @@ func TestWhitespace(t *testing.T) {
 			Token: Token{
 				Start: Location{Name: "test.tcl", Column: 2, Line: 2, Offset: 3},
 				End:   Location{Name: "test.tcl", Column: 1, Line: 3, Offset: 4},
-				Kind:  TNewline,
+				Kind:  Stop,
 				Raw:   []byte{'\n'},
 			},
 		},
@@ -247,7 +243,7 @@ func TestWhitespace(t *testing.T) {
 			Token: Token{
 				Start: Location{Name: "test.tcl", Column: 1, Line: 3, Offset: 4},
 				End:   Location{Name: "test.tcl", Column: 3, Line: 3, Offset: 6},
-				Kind:  TWhitespace,
+				Kind:  Whitespace,
 				Raw:   []byte("\t "),
 			},
 		},
@@ -262,54 +258,49 @@ type flagTest struct {
 
 func (f flagTest) Test(t *testing.T) {
 	t.Run("On", func(t *testing.T) {
-		setlogf(t)
 		f.On.Run(t, f.Seq)
 	})
 	t.Run("Off", func(t *testing.T) {
-		setlogf(t)
 		f.Off.Run(t, f.Seq)
 	})
 }
 
 func TestInvalidUTF8(t *testing.T) {
-	setlogf(t)
 	tokenSeq{_error}.Run(t, "\xff")
 }
 
 func TestStatementInvalid(t *testing.T) {
-	setlogf(t)
 	tokenSeq{
-		{Token: Token{Kind: TWord, Raw: []byte("a"), Value: "a"}},
+		{Token: Token{Kind: Word, Raw: []byte("a"), Value: "a"}},
 		_eof,
 	}.Run(t, `a`)
 	tokenSeq{
-		{Token: Token{Kind: TWord, Raw: []byte("a"), Value: "a"}},
+		{Token: Token{Kind: Word, Raw: []byte("a"), Value: "a"}},
 		_error,
 	}.Run(t, "a\x00")
 }
 
 func TestString(t *testing.T) {
-	setlogf(t)
 	tokenSeq{
-		{Token: Token{Kind: TWord, Raw: []byte("stmt"), Value: "stmt"}},
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`""`), Value: ""}}, _nl,
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`"simple string"`), Value: `simple string`}}, _nl,
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`"string with [square brackets "quoted"] inside"`), Value: `string with [square brackets "quoted"] inside`}}, _nl,
+		{Token: Token{Kind: Word, Raw: []byte("stmt"), Value: "stmt"}},
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`""`), Value: ""}}, _nl,
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`"simple string"`), Value: `simple string`}}, _nl,
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`"string with [square brackets "quoted"] inside"`), Value: `string with [square brackets "quoted"] inside`}}, _nl,
 		_ws,
 		// Very weird quoting if you're not careful:
-		{Token: Token{Kind: TString, Raw: []byte(`"string with \[square brackets "`), Value: `string with \[square brackets `}},
-		{Token: Token{Kind: TWord, Raw: []byte(`quoted"`), Value: `quoted"`}},
-		_bracketclose,
-		_ws,
-		{Token: Token{Kind: TWord, Raw: []byte(`inside"`), Value: `inside"`}},
+		{Token: Token{Kind: QuotedString, Raw: []byte(`"string with \[square brackets "`), Value: `string with \[square brackets `}},
+		{Token: Token{Kind: Word, Raw: []byte(`quoted`), Value: `quoted`}},
+		{Token: Token{Kind: QuotedString, Raw: []byte(`"] inside"`), Value: `] inside`}},
 		_nl,
 		// End very weird quoting.
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`"\a\b\f\n\r\t\v\\\""`), Value: `\a\b\f\n\r\t\v\\\"`}}, _nl,
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`"\123\xff\u7fff\U00001234"`), Value: `\123\xff\u7fff\U00001234`}}, _nl,
-		_ws, {Token: Token{Kind: TString, Raw: []byte(`"\xFF"`), Value: `\xFF`}}, _nl,
-		_ws, {Token: Token{Kind: TWord, Raw: []byte(`a"b"c`), Value: `a"b"c`}}, _nl,
-		_ws, {Token: Token{Kind: TSimpleString, Raw: []byte(`{a b c}`), Value: "a b c"}}, _nl,
-		_ws, {Token: Token{Kind: TSimpleString, Raw: []byte(`{a {b\} c[}`), Value: `a {b\} c[`}}, _nl,
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`"\a\b\f\n\r\t\v\\\""`), Value: `\a\b\f\n\r\t\v\\\"`}}, _nl,
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`"\123\xff\u7fff\U00001234"`), Value: `\123\xff\u7fff\U00001234`}}, _nl,
+		_ws, {Token: Token{Kind: QuotedString, Raw: []byte(`"\xFF"`), Value: `\xFF`}}, _nl,
+		_ws, {Token: Token{Kind: Word, Raw: []byte(`a`), Value: `a`}},
+		{Token: Token{Kind: QuotedString, Raw: []byte(`"b"`), Value: `b`}},
+		{Token: Token{Kind: Word, Raw: []byte(`c`), Value: `c`}}, _nl,
+		_ws, {Token: Token{Kind: RawString, Raw: []byte(`{a b c}`), Value: "a b c"}}, _nl,
+		_ws, {Token: Token{Kind: RawString, Raw: []byte(`{a {b\} c[}}`), Value: `a {b\} c[}`}}, _nl,
 		_nl,
 		_ws, _semicolon,
 		_eof,
@@ -323,16 +314,15 @@ func TestString(t *testing.T) {
 			"\xFF"
 			a"b"c
 			{a b c}
-			{a {b\} c[}
+			{a {b\} c[}}
 
 		;`)
 }
 
 func TestInvalidStrings(t *testing.T) {
-	setlogf(t)
 	invalid := tokenSeq{
 		{Token: Token{
-			Kind:  TWord,
+			Kind:  Word,
 			Raw:   []byte("stmt"),
 			Value: "stmt",
 		}},
@@ -358,7 +348,6 @@ func TestLocationString(t *testing.T) {
 		want      = "2:34:45"
 		wantNamed = "Location Name:" + want
 	)
-	setlogf(t)
 	loc := Location{
 		Line:   2,
 		Column: 34,

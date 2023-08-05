@@ -1,1070 +1,658 @@
 package mtcl
 
 import (
-	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
-	"log"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	perrors "github.com/pkg/errors"
+	"go.spiff.io/mtcl/lexer"
+	"go.spiff.io/mtcl/token"
 )
 
-var (
-	ErrNotFound    = errors.New("not found")
-	ErrVarNotFound = fmt.Errorf("variable %w", ErrNotFound)
-	ErrCmdNotFound = fmt.Errorf("command %w", ErrNotFound)
-)
-
-type CmdFunc func(interp *Interp, args []string) (string, error)
-
-func (cmd CmdFunc) Call(interp *Interp, args []string) (string, error) {
-	return cmd(interp, args)
-}
-
-type Cmd interface {
-	Call(interp *Interp, args []string) (string, error)
-}
-
-type Interp struct {
-	root  interpScope
-	scope *interpScope
-}
-
-func NewInterp() *Interp {
-	tr := &Interp{
-		root: interpScope{
-			cmds: map[string]Cmd{
-				"set": CmdFunc(func(tr *Interp, args []string) (string, error) {
-					if len(args) != 2 {
-						return "", fmt.Errorf("expected 'set name value', got %d args", len(args))
-					}
-					tr.scope.vars[args[0]] = args[1]
-					return args[1], nil
-				}),
-				"puts": CmdFunc(func(tr *Interp, args []string) (string, error) {
-					_, err := fmt.Println(strings.Join(args, "\t"))
-					return "", err
-				}),
-				"concat": CmdFunc(func(tr *Interp, args []string) (string, error) {
-					return strings.Join(args, ""), nil
-				}),
-				"list": CmdFunc(func(tr *Interp, args []string) (string, error) {
-					return strings.Join(args, "\t"), nil
-				}),
-			},
-			vars:   map[string]string{},
-			parent: &interpScope{},
-			interp: &Interp{},
-		},
-	}
-	tr.scope = &tr.root
-	return tr
-}
-
-func (tr *Interp) Cmd(name string) Cmd {
-	scope := tr.scope
-	for scope != nil {
-		cmd, ok := scope.cmds[name]
-		if ok {
-			return cmd
-		}
-		scope = scope.parent
-	}
-	return nil
-}
-
-func (tr *Interp) Eval(command []Word) (string, error) {
-	if len(command) == 0 {
-		return "", nil
-	}
-
-	cmdName, err := command[0].Eval(tr)
-	if err != nil {
-		return "", fmt.Errorf("unable to evaluate command name %v: %w", command[0], err)
-	}
-
-	cmd := tr.Cmd(cmdName)
-	if cmd == nil {
-		return "", fmt.Errorf("%w: %q", ErrCmdNotFound, cmdName)
-	}
-
-	args := make([]string, len(command)-1)
-	for i, arg := range command[1:] {
-		args[i], err = arg.Eval(tr)
-		if err != nil {
-			nth := i + 1
-			return "", fmt.Errorf("cannot call %q: cannot evaluate arg %d: %w", cmdName, nth, err)
-		}
-	}
-
-	return cmd.Call(tr, args)
-}
-
-type interpScope struct {
-	cmds   map[string]Cmd
-	vars   map[string]string
-	parent *interpScope
-	interp *Interp
-}
-
-func (s *interpScope) expand(name string) (string, error) {
-	for s != nil {
-		val, ok := s.vars[name]
-		if ok {
-			return val, nil
-		}
-		s = s.parent
-	}
-	return "", fmt.Errorf("%w: %q", ErrVarNotFound, name)
-}
-
-type Word interface {
-	Eval(*Interp) (string, error)
-	String() string
-}
-
-type Literal string // {a curly bracket string}
-
-func (l Literal) Eval(*Interp) (string, error) {
-	return string(l), nil
-}
-
-func (l Literal) String() string { return string(l) }
-
-type Bareword string // A_${word}_without_spaces
-
-func (s Bareword) Eval(interp *Interp) (string, error) {
-	str := string(s)
-	var out strings.Builder
-	out.Grow(len(str))
-	escape := false
-	for str != "" {
-		adv := 0
-		for i, r := range str {
-			if escape {
-				escape = false
-			} else if r == rEscape {
-				escape = true
-				continue
-			} else if r == rDollar { // Not bothering to allow ${...}
-				adv = i + 1
-				break
-			}
-			n, _ := out.WriteRune(r)
-			adv = i + n
-		}
-		str = str[adv:]
-
-		if str == "$" {
-			out.WriteString(str)
-			break
-		}
-
-		if str != "" && str[0] == rEscape {
-			escape, str = true, str[1:]
-			continue
-		}
-
-		if str == "" {
-			break
-		}
-
-		log.Printf("EXPAND %q", str)
-
-		var name string
-		if str[0] == rCurlOpen {
-			end := -1
-			for i, r := range str[1:] {
-				end = i
-				if escape {
-					escape = false
-					continue
-				} else if r == rEscape {
-					escape = true
-				} else if r == rCurlClose {
-					break
-				}
-			}
-			if end == -1 {
-				out.WriteString(str)
-				break
-			}
-			name, str = str[1:1+end], str[2+end:]
-		} else if end := strings.IndexFunc(str, firstNonVar); end >= 0 {
-			name, str = str[:end], str[end:]
-		} else if end == -1 {
-			name, str = str, ""
-		}
-
-		log.Printf("EXPAND NAME=%q REST=%q", name, str)
-		if val, err := interp.scope.expand(name); err == nil && val != "" {
-			out.WriteString(val)
-		} else if err != nil {
-			return out.String(), err
-		}
-	}
-
-	return out.String(), nil
-}
-
-func firstNonVar(r rune) bool {
-	return r == rEscape || unicode.IsSpace(r)
-}
-
-func (s Bareword) String() string { return string(s) }
-
-type Bundle []Word // One or more barewords, expressions, or quoted strings run together.
-
-func (b Bundle) Eval(interp *Interp) (string, error) {
-	var out strings.Builder
-	for _, chunk := range b {
-		str, err := chunk.Eval(interp)
-		if err != nil {
-			return "", fmt.Errorf("failed to evaluate expression %q: %w", b, err)
-		}
-		_, _ = out.WriteString(str)
-	}
-	return out.String(), nil
-}
-
-func (b Bundle) String() string {
-	var out strings.Builder
-	for _, chunk := range b {
-		_, _ = out.WriteString(chunk.String())
-	}
-	return out.String()
-}
-
-type Quote []Word // "quoted $string [with expressions]"
-
-func (q Quote) Eval(tr *Interp) (string, error) {
-	var out strings.Builder
-	for _, exp := range q {
-		str, err := exp.Eval(tr)
-		if err != nil {
-			return out.String(), err
-		}
-		_, _ = out.WriteString(str)
-	}
-	return out.String(), nil
-}
-
-func (q Quote) String() string {
-	var out strings.Builder
-	_ = out.WriteByte('"')
-	for _, chunk := range q {
-		_, _ = out.WriteString(chunk.String())
-	}
-	_ = out.WriteByte('"')
-	return out.String()
-}
-
-type Expr []Line // [expression inside brackets]
-
-func (e Expr) Eval(tr *Interp) (last string, err error) {
-	for _, line := range e {
-		last, err = tr.Eval([]Word(line))
-		if err != nil {
-			return
-		}
-	}
-	return
-}
-
-func (e Expr) String() string {
-	var out strings.Builder
-	_ = out.WriteByte('[')
-	for i, chunk := range e {
-		if i > 0 {
-			_, _ = out.WriteString("; ")
-		}
-		_, _ = out.WriteString(chunk.String())
-	}
-	_ = out.WriteByte(']')
-	return out.String()
-}
-
-type Line []Word // A command or line
-
-func (s Line) String() string {
-	var out strings.Builder
-	for i, chunk := range s {
-		if i > 0 {
-			_ = out.WriteByte(' ')
-		}
-		_, _ = out.WriteString(chunk.String())
-	}
-	return out.String()
-}
-
-type Source struct {
-	Name   string
-	Parent *Source
-	Lines  []Line
-}
-
-func (s *Source) Eval(tr *Interp) (last string, err error) {
-	for _, line := range s.Lines {
-		log.Printf("Evaluating line: %v", line)
-		last, err = tr.Eval([]Word(line))
-		if err != nil {
-			return
-		}
-	}
-	return
-}
-
-func (s *Source) String() string {
-	var out strings.Builder
-	for i, chunk := range s.Lines {
-		if i > 0 {
-			_ = out.WriteByte('\n')
-		}
-		_, _ = out.WriteString(chunk.String())
-	}
-	return out.String()
+type TokenReader interface {
+	Pos() token.Location
+	ReadToken() (token.Token, error)
 }
 
 type Parser struct {
-	lex     *Lexer
-	src     *Source
-	lasttok Token
+	stack []TokenReader
+	tok   token.Token
+	last  token.Token
 
 	subexpr bool
 	depth   uint64
+
+	ldepth  int
+	LogFunc func(...any)
 }
 
-func NewParser(in *Lexer, out *Source) *Parser {
-	return &Parser{lex: in, src: out}
+func NewParser(r TokenReader) *Parser {
+	return &Parser{stack: []TokenReader{r}}
 }
 
-func parseSeq(src *Source, seq []Token) (result Word, rest []Token, err error) {
-	if len(seq) == 0 {
-		panic("attempt to call parseSeq with empty sequence")
+func (p *Parser) logf(format string, args ...any) {
+	if p.LogFunc == nil {
+		return
+	}
+	p.LogFunc(
+		strings.Repeat("  ", p.ldepth) + "[" + p.lexer().Pos().String() + "]: " + fmt.Sprintf(format, args...),
+	)
+}
+
+func (p *Parser) inc(sect string) func() {
+	depth := p.ldepth
+	p.logf("Start -> %s", sect)
+	p.ldepth = depth + 1
+	return func() {
+		p.ldepth = depth
+		p.logf("End -> %s", sect)
+	}
+}
+
+type Expr interface {
+	Token() token.Token
+}
+
+// A Block is a set of Commands enclosed in square brackets, such as
+// `[concat a b]`.
+type Block struct {
+	Block []*Command `json:"block"`
+
+	StartTok token.Token `json:"-"` // '[' token
+	EndTok   token.Token `json:"-"` // ']' token
+}
+
+func (b *Block) Token() token.Token {
+	return b.StartTok
+}
+
+// Access is a variable access denoted as `$var` or `${var}`.
+type Access struct {
+	Access string `json:"access"`
+
+	Braced bool        `json:"braced,omitempty"` // True if variable name enclosed in curly braces.
+	Tok    token.Token `json:"-"`
+}
+
+func (a *Access) Token() token.Token {
+	return a.Tok
+}
+
+// A Literal is literal text that has no evaluated form other than itself.
+type Literal struct {
+	Literal string      `json:"literal"`
+	Tok     token.Token `json:"-"`
+}
+
+func (l *Literal) Token() token.Token {
+	return l.Tok
+}
+
+// A Word is any set of expressions that run together without whitespace
+// breaking them up.
+type Word struct {
+	Word []Expr      `json:"word"`
+	Tok  token.Token `json:"-"`
+}
+
+func (w *Word) Token() token.Token {
+	return w.Tok
+}
+
+// A QuoteString is a string starting and ending in double quotes made up
+// of Words, Accesses, and Blocks.
+type QuoteString struct {
+	QuoteString *Word `json:"quote_string"`
+}
+
+func (qs *QuoteString) Token() token.Token {
+	return qs.QuoteString.Token()
+}
+
+// A RawString is a string wrapped in curly braces that has no interpreted
+// value other than itself, minus escaped curly braces.
+type RawString struct {
+	RawString string      `json:"raw_string"`
+	Tok       token.Token `json:"-"`
+}
+
+func (rs *RawString) Token() token.Token {
+	return rs.Tok
+}
+
+type Command struct { // Expr+ Stop
+	Command Expr   `json:"command"`
+	Params  []Expr `json:"params"`
+}
+
+func (c *Command) Token() token.Token {
+	return c.Command.Token()
+}
+
+func (p *Parser) Parse() (cmds []*Command, err error) {
+	defer captureErr(&err)
+	if p.tok.Kind == token.Invalid {
+		p.logf("Grabbing first token (%v)", p.tok)
+		p.next()
+	}
+	p.logf("Starting parser")
+	return p.parseCommands(func(tk token.TokenKind) bool {
+		return tk == token.EOF
+	}), nil
+}
+
+func (p *Parser) parseCommands(end func(token.TokenKind) bool) (cmds []*Command) {
+	defer p.inc("command list")()
+	p.skipLeading()
+	for !end(p.tok.Kind) {
+		p.logf("Parsing command (%v)", p.tok)
+		if cmd := p.parseCommand(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
-	where := seq[0].Start
-	switch seq[0].Kind {
-	case TBracketOpen:
-		// parse expr
-		var e Expr
-		var l Line
-		rest = seq[1:]
-		for len(rest) > 0 {
-			log.Print(rest)
-			switch rest[0].Kind {
-			case TBracketClose:
-				if len(l) > 0 {
-					e = append(e, l)
-				}
-				return e, rest[1:], nil
-			case TSemicolon, TComment, TNewline:
-				if len(l) > 0 {
-					e = append(e, l)
-				}
-				l = nil
-			}
-			result, rest, err = parseSeq(src, rest)
-			if err != nil {
-				return nil, seq, fmt.Errorf("error parsing [expr] at %v: %w", where, err)
-			}
-			l = append(l, result)
-		}
-		if len(rest) == 0 {
-			return nil, seq, fmt.Errorf("missing closing ] for [expr] at %v", where)
-		}
-		return e, rest[1:], nil
-	case TSimpleString:
-		return Literal(seq[0].Value), seq[1:], nil
-	case TWord:
-		return Bareword(seq[0].Value), seq[1:], nil
-	case TString:
-		var q Quote
-		str := seq[0].Value
-		for str != "" {
-			adv := 0
-			skip := 0
-			escape := false
-			for i, r := range str {
-				if r == rEscape {
-					escape = true
-				} else if escape {
-					escape = false
-				} else if r == rBracketOpen {
-					adv, skip = i, 1
-					break
-				}
-				adv = i + utf8.RuneLen(r)
-			}
+	return cmds
 
-			if adv > 0 {
-				log.Printf("substring: %q", str[:adv])
-				q = append(q, Bareword(str[:adv]))
-			}
-			str = str[adv+skip:]
+}
+
+func (p *Parser) parseCommand() *Command {
+	defer p.inc("command")()
+	p.skipLeading()
+	if p.tok.Kind == token.EOF {
+		return nil
+	}
+	p.logf("Parsing name => %v", p.tok)
+	cmd := &Command{
+		Command: p.parseExpr(),
+	}
+	for !p.stop() {
+		_ = p.ws() // Skip whitespace.
+		p.logf("Parsing param %d => %v", len(cmd.Params), p.tok)
+		param := p.parseExpr()
+		if param == nil {
+			break
+		}
+		cmd.Params = append(cmd.Params, param)
+	}
+	return cmd
+}
+
+func (p *Parser) parseExpr() Expr {
+	defer p.inc("expr")()
+	var parts []Expr
+
+loop:
+	for {
+		tok := p.tok
+		switch tok.Kind {
+		case token.BracketOpen:
+			parts = append(parts, p.parseBlock())
+		case token.Word:
+			parts = append(parts, p.parseString())
+		case token.RawString:
+			parts = append(parts, &RawString{RawString: tok.Value, Tok: tok})
+			p.next()
+		case token.QuotedString:
+			// Pretending:
+			parts = append(parts, &QuoteString{
+				QuoteString: p.parseString(),
+			})
+		default:
+			break loop
+		}
+	}
+
+	switch len(parts) {
+	case 0:
+		return nil
+	case 1:
+		return parts[0]
+	default:
+		return &Word{Word: parts}
+	}
+}
+
+func (p *Parser) parseString() *Word {
+	defer p.inc("string content")()
+	tok := p.expectOne(token.Word, token.QuotedString)
+	word := &Word{
+		Tok: tok,
+	}
+
+	if tok.Value == "" {
+		return word
+	}
+
+	const (
+		rEscape      = '\\'
+		rBracketOpen = '['
+		rDollar      = '$'
+		rCurlOpen    = '{'
+		rCurlClose   = '}'
+	)
+
+	pos := tok.Start
+	if tok.Kind == token.QuotedString { // Skip leading quote.
+		pos = pos.AdvancedBy('"', 1)
+	}
+
+	str := tok.Value
+	take := func(r byte) bool {
+		if str != "" && str[0] == r {
+			str = str[1:]
+			pos = pos.AdvancedBy(rune(r), 1)
+			return true
+		}
+		return false
+	}
+
+	for str != "" {
+		var lit strings.Builder
+
+		p.logf("String content: %q", str)
+		switch str[0] { // Non-ASCII catches down in the literal splitting below.
+		case '[':
+			p.logf("[expr] in string: %s", str)
+			lexer := lexer.NewLexer(strings.NewReader(str))
+			lexer.SetPos(pos)
+			block := pushWith(p, lexer, func() *Block {
+				defer p.inc("[block] in string")()
+				return p.parseBlock()
+			})
+			word.Word = append(word.Word, block)
+			diff := block.EndTok.End.Offset - block.StartTok.Start.Offset
+			pos = block.EndTok.End
+			str = str[diff:]
+			p.logf("String content remaining after block (%v -> %v :: +%d): %q", block.StartTok.Start, block.EndTok.End, diff, str)
+			continue
+
+		case '$':
+			start := pos
+			take('$')
 
 			if str == "" {
+				// Treat as a literal if the $ was the only
+				// remaining text.
+				word.Word = append(word.Word, &Literal{Literal: "$", Tok: tok})
+				return word
+			}
+
+			if strings.HasPrefix(str, `\`) {
+				// Treat as literal if the $ is immediately
+				// followed by a backslash.
+				lit.WriteRune('$')
 				break
 			}
 
-			log.Printf("subexpr: [%s", str)
-			lexer := NewLexer(strings.NewReader(str))
-			subsrc := &Source{Name: src.Name, Parent: src}
-			parser := NewParser(lexer, subsrc)
-			parser.subexpr = true
+			p.logf("$access in string: %s", str)
 
-			subsrc, err = parser.Parse()
-			if err != nil {
-				return nil, seq, fmt.Errorf("unable to parse quoted [subexpression] in string at %v: %w", where, err)
-			}
-
-			q = append(q, Expr(subsrc.Lines))
-			for n, line := range subsrc.Lines {
-				log.Printf("%q -> %2d %v", seq[0].Value, n, line)
-			}
-			str = str[parser.lasttok.End.Offset:]
-			log.Printf("remainder: %q", str)
-		}
-
-		return q, seq[1:], nil
-	default:
-		panic(fmt.Errorf("invalid token type for parseSeq: %v", seq[0].Kind))
-	}
-}
-
-func (p *Parser) Parse() (*Source, error) {
-	var line Line
-	var seq []Token
-
-	endseq := func() error {
-		var out []Word
-		input := seq
-		for len(input) > 0 {
-			w, rest, err := parseSeq(p.src, input)
-			if err != nil {
-				return err
-			}
-			input, out = rest, append(out, w)
-		}
-		switch len(out) {
-		case 0:
-		case 1:
-			line = append(line, out[0])
-		default:
-			line = append(line, Bundle(out))
-		}
-		seq = seq[:0]
-		return nil
-	}
-
-	endline := func() error {
-		if err := endseq(); err != nil {
-			return err
-		}
-		if len(line) > 0 {
-			p.src.Lines = append(p.src.Lines, line)
-			line = nil
-		}
-		return nil
-	}
-
-	for {
-		// TODO: Going to need to rewrite this as a proper parser
-		// since this doesn't handle [expr]s correctly.
-		tok, err := p.lex.ReadToken()
-		if tok.Kind == TEOF || errors.Is(err, io.EOF) {
-			return p.src, endline()
-		} else if err != nil {
-			return p.src, err
-		}
-		p.lasttok = tok
-
-		switch tok.Kind {
-		case TWhitespace, TContinuation:
-			if err := endseq(); err != nil {
-				return p.src, err
-			}
-			continue
-		case TComment, TNewline, TSemicolon:
-			if p.depth == 0 {
-				if err := endline(); err != nil {
-					return p.src, err
+			// Skip over $
+			braced := take('{')
+			if braced {
+				p.logf("braced access")
+				// No escapes allowed at this point, all
+				// raw text for the var name.
+				name, rest, ok := strings.Cut(str, "}")
+				if !ok {
+					exitf("expected closing } for variable %v, found none", start)
 				}
-				continue
+
+				str = rest
+				word.Word = append(word.Word, &Access{
+					Access: name,
+					Braced: braced,
+					Tok:    tok,
+				})
+
+				for _, r := range name {
+					pos = pos.AdvancedBy(r, utf8.RuneLen(r))
+				}
+				pos = pos.AdvancedBy('}', 1)
+			} else {
+				p.logf("bare access")
+				stop := strings.IndexFunc(str, func(r rune) bool {
+					switch r {
+					case '[', ']', '{', '}', '$', '*', '(', ')', '`', '\'', '"', '\\':
+						return true
+					}
+					return unicode.IsSpace(r)
+				})
+
+				name := str
+				if stop > -1 {
+					name, str = str[:stop], str[stop:]
+				} else {
+					str = ""
+				}
+
+				word.Word = append(word.Word, &Access{
+					Access: name,
+					Tok:    tok,
+				})
+
+				for _, r := range name {
+					pos = pos.AdvancedBy(r, utf8.RuneLen(r))
+				}
 			}
-			tok.Kind = TSemicolon
-		case TBracketOpen:
-			p.depth++
-		case TBracketClose:
-			if !p.subexpr {
+		}
+
+		// Default -- parse literal:
+		adv := 0
+		escape := false
+		for i, r := range str {
+			raw := r
+			if r == '\\' {
+				escape = true
+			} else if escape {
+				switch r {
+				case '0':
+					r = 0
+				case 'n':
+					r = '\n'
+				case 'r':
+					r = '\r'
+				case 't':
+					r = '\t'
+				case 'a':
+					r = '\a'
+				case 'b':
+					r = '\b'
+				case 'f':
+					r = '\f'
+				case 'v':
+					r = '\v'
+				case 'e':
+					r = 0x1b
+				}
+				escape = false
+			} else if r == '[' || r == '$' {
+				// Break out of literal and start lexer /
+				// parser until block is consumed.
+				p.logf("Encountered %q -- splitting literal", r)
+				adv = i
 				break
 			}
-			if p.subexpr && p.depth == 0 {
-				return p.src, endline()
+
+			size := utf8.RuneLen(raw)
+			p.logf("advance by %q :: %d", raw, size)
+			pos = pos.AdvancedBy(raw, size)
+			adv = i + size
+			if !escape {
+				lit.WriteRune(r)
 			}
-			if p.depth == 0 {
-				return p.src, fmt.Errorf("invalid closing bracket at %v", tok.Start)
-			}
-			p.depth--
 		}
 
-		seq = append(seq, tok)
+		str = str[adv:]
+		if lit.Len() > 0 {
+			literal := &Literal{Literal: lit.String(), Tok: tok}
+			word.Word = append(word.Word, literal)
+			p.logf("Literal chunk: %q", literal.Literal)
+		}
+	}
+
+	return word
+}
+
+func (p *Parser) parseBlock() *Block {
+	defer p.inc("[block]")()
+	start := p.expect(token.BracketOpen, "")
+	p.logf("Parsing block => %v", start)
+	p.skipLeading()
+
+	end, empty := p.maybe(token.BracketClose)
+	if empty {
+		p.logf("Empty block expression")
+		return &Block{
+			StartTok: start,
+			EndTok:   end,
+		}
+	}
+
+	cmds := p.parseCommands(func(tk token.TokenKind) bool {
+		return tk == token.BracketClose || (len(p.stack) > 1 && tk == token.EOF)
+	})
+	end = p.expect(token.BracketClose, "")
+
+	return &Block{
+		Block:    cmds,
+		StartTok: start,
+		EndTok:   end,
 	}
 }
 
-// ErrUnexpectedEOF is returned by the Lexer when EOF is encountered mid-token where a valid token
-// cannot be cut off.
-var ErrUnexpectedEOF = errors.New("unexpected EOF")
+// Token consumption:
 
-const eof rune = -1
+func pushWith[T any](p *Parser, r TokenReader, fn func() T) T {
+	done := p.inc("nested lexer")
+	p.push(r)
+	defer func(last token.Token) {
+		p.last, p.tok = p.tok, last
+		p.pop()
+		done()
+	}(p.tok)
+	p.next()
+	return fn()
+}
 
-// TokenKind is an enumeration of the kinds of tokens produced by a Lexer and consumed by a Parser.
-type TokenKind uint
+func (p *Parser) lexer() TokenReader {
+	return p.stack[len(p.stack)-1]
+}
 
-func (t TokenKind) String() string {
-	i := int(t)
-	if i < 0 || len(tokenNames) <= i {
-		return "invalid"
+func (p *Parser) push(r TokenReader) {
+	p.stack = append(p.stack, r)
+}
+
+func (p *Parser) pop() {
+	top := len(p.stack) - 1
+	if top == 0 {
+		exitf("attempt to pop bottom lexer from stack")
+		return
 	}
-	return tokenNames[t]
+	p.stack[top] = nil
+	p.stack = p.stack[:top]
 }
 
-// Lex-able Token kinds encountered in mtcl.
-const (
-	tEmpty = TokenKind(iota)
-
-	TEOF // !.
-
-	// BarewordRune := ![;{}\[\]"'`] Unicode(L,M,N,P,S)
-
-	TWhitespace   // [ \n\r\t]+
-	TComment      // '//' { !EOL . } ( EOL | EOF )
-	TWord         // BarewordRune {BarewordRune}
-	TNewline      // '\n'
-	TContinuation // '\\' '\n' -- to be treated same as whitespace.
-	TSemicolon    // ';'
-	TBracketOpen  // '['
-	TBracketClose // ']'
-
-	// A string is any double-quoted string
-	TString       // '"' ( Escape | [^"] )* '"'
-	TSimpleString // '{' ( Escape | [^}] )* '}'
-)
-
-var tokenNames = []string{
-	tEmpty: "empty",
-
-	TEOF: "EOF",
-
-	TWhitespace: "whitespace",
-	TComment:    "comment",
-
-	TWord: "word",
-
-	TNewline:      "newline",
-	TContinuation: "continuation",
-	TSemicolon:    "semicolon",
-	TBracketOpen:  "open bracket",
-	TBracketClose: "close bracket",
-
-	TString:       `"string"`,
-	TSimpleString: "{string}",
-}
-
-// Token is a token with a kind and a start and end location. Start, end,
-// and raw fields are considered metadata and should not be used by a parser
-// except to provide information to the user. The value string may be used
-// by an interpreter.
-type Token struct {
-	Start, End Location
-	Kind       TokenKind
-	Raw        []byte
-	Value      string
-}
-
-// Location describes a location in an input byte sequence.
-type Location struct {
-	Name   string // Name is an identifier, usually a file path, for the location.
-	Offset int    // A byte offset into an input sequence. Starts at 0.
-	Line   int    // A line number, delimited by '\n'. Starts at 1.
-	Column int    // A column number. Starts at 1.
-}
-
-func (l Location) String() string {
-	pos := strconv.Itoa(l.Line) + ":" + strconv.Itoa(l.Column) + ":" + strconv.Itoa(l.Offset)
-	if l.Name != "" {
-		return l.Name + ":" + pos
-	}
-	return pos
-}
-
-func (l Location) add(r rune, size int) Location {
-	l.Offset += size
-	l.Column++
-	if r == rNewline {
-		l.Line++
-		l.Column = 1
-	}
-	return l
-}
-
-type scanResult struct {
-	r    rune
-	size int
-	err  error
-}
-
-// NamedReader is an optional interface that an io.Reader can implement to provide a name for its
-// data source.
-type NamedReader interface {
-	io.Reader
-
-	// Name returns a non-empty string identifying the reader's data source. This may be a file,
-	// URL, resource ID, or some other thing. If the returned string is empty, it will be
-	// treated as unnamed.
-	Name() string
-}
-
-var noToken Token
-
-// Special lexer runes
-const (
-	rNewline      = '\n'
-	rSentinel     = ';'
-	rCurlOpen     = '{'
-	rCurlClose    = '}'
-	rBracketOpen  = '['
-	rBracketClose = ']'
-	rDoubleQuote  = '"'
-	rComment      = '#'
-	rEscape       = '\\'
-	rDollar       = '$'
-)
-
-// Lexer takes an input sequence of runes and constructs Tokens from it.
-type Lexer struct {
-	// Name is the name of the token source currently being lexed. It is used to identify the
-	// source of a location by name. It is not necessarily a filename, but usually is.
-	//
-	// If the scanner provided to the Lexer implements NamedScanner, the scanner's name takes
-	// priority.
-	Name string
-
-	scanner io.RuneReader
-
-	pending  bool
-	lastScan scanResult
-	lastPos  Location
-
-	startPos Location
-	pos      Location
-
-	next consumerFunc
-
-	buf    bytes.Buffer
-	strbuf bytes.Buffer
-}
-
-// NewLexer allocates a new Lexer that reads runes from r.
-func NewLexer(r io.Reader) *Lexer {
-	rr := runeReader(r)
-
-	le := &Lexer{
-		scanner: rr,
-		pos:     Location{Line: 1, Column: 1},
-	}
-	return le
-}
-
-type nameRuneReader struct {
-	*bufio.Reader
-	namefn func() string
-}
-
-func (n nameRuneReader) Name() string {
-	return n.namefn()
-}
-
-func runeReader(r io.Reader) io.RuneReader {
-	switch r := r.(type) {
-	case io.RuneReader:
-		return r
-	case NamedReader:
-		return nameRuneReader{bufio.NewReader(r), r.Name}
-	default:
-		return bufio.NewReader(r)
-	}
-}
-
-// ReadToken returns a token or an error. If EOF occurs, a TEOF token is returned without an error,
-// and will be returned by all subsequent calls to ReadToken.
-func (l *Lexer) ReadToken() (tok Token, err error) {
-	l.reset()
-	if l.next == nil {
-		l.next = l.lexSegment
-	}
-
-	if l.pos == (Location{Line: 1, Column: 1}) {
-		l.pos.Name = l.posName()
-	}
-	l.startPos = l.scanPos()
-
-	var r rune
+func (p *Parser) next() token.TokenKind {
 	for {
-		r, err = l.readRune()
+		t, err := p.lexer().ReadToken()
 		if err != nil {
-			return tok, err
+			p.bailf(err, "error reading token")
 		}
-
-		tok, l.next, err = l.next(r)
-		if err != nil || tok.Kind != tEmpty {
-			return tok, err
+		if t.Kind == token.Comment {
+			p.logf("Skipping comment %v", t)
+			continue
 		}
+		p.logf("Next token: %v", t)
+		p.last, p.tok = p.tok, t
+		return t.Kind
 	}
 }
 
-type convertFunc func(Token) (Token, error)
-
-func (l *Lexer) valueToken(kind TokenKind, convert convertFunc) (tok Token, err error) {
-	tok = l.token(kind, true)
-	if convert != nil {
-		tok, err = convert(tok)
+func (p *Parser) maybe(kind token.TokenKind) (match token.Token, ok bool) {
+	t := p.tok
+	if t.Kind == kind {
+		p.logf("maybe: matched %v, advancing", kind)
+		p.next()
+		return t, true
 	}
-	return tok, err
+	return t, false
 }
 
-var (
-	rawContinuation = []byte{'\\', '\n'}
-	rawNewline      = []byte{'\n'}
-	rawBracketOpen  = []byte{'['}
-	rawBracketClose = []byte{']'}
-	rawSemicolon    = []byte{';'}
-)
-
-func (l *Lexer) token(kind TokenKind, takeBuffer bool) Token {
-	var txt []byte
-	if buflen := l.buf.Len(); buflen > 0 && takeBuffer {
-		txt = make([]byte, buflen)
-		copy(txt, l.buf.Bytes())
-	} else if takeBuffer {
-		txt = []byte{}
-	} else {
-		switch kind {
-		case TNewline:
-			txt = rawNewline
-		case TBracketOpen:
-			txt = rawBracketOpen
-		case TBracketClose:
-			txt = rawBracketClose
-		case TSemicolon:
-			txt = rawSemicolon
-		case TContinuation:
-			txt = rawContinuation
+func (p *Parser) expectOne(kinds ...token.TokenKind) token.Token {
+	t := p.tok
+	if len(kinds) == 0 {
+		exit(errors.New("empty input to expectOne"))
+	}
+	for _, k := range kinds {
+		if t.Kind == k {
+			p.logf("expectOne: matched %v, advancing", k)
+			p.next() // Advance to next token.
+			return t
 		}
 	}
-	l.buf.Reset()
-	tok := Token{
-		Start: l.startPos,
-		End:   l.scanPos(),
-		Kind:  kind,
-		Raw:   txt,
-	}
-	if takeBuffer {
-		tok.Value = l.strbuf.String()
-		l.strbuf.Reset()
-	}
-	return tok
+	p.bailf(unexpectedf(t, "expected one of %v", kinds), "error parsing input")
+	panic("unreachable")
 }
 
-func (l *Lexer) readRune() (r rune, err error) {
-	const invalid rune = '\uFFFD'
-
-	if l.pending {
-		l.pending = false
-		return l.lastScan.r, l.lastScan.err
-	}
-
-	var size int
-	l.pos.Name = l.posName()
-	r, size, err = l.scanner.ReadRune()
-	if err == io.EOF {
-		r, size, err = eof, 0, nil
-	}
-	res := scanResult{r: r, size: size, err: err}
-	l.lastScan, l.lastPos = res, l.pos
-	if size > 0 {
-		l.pos = l.pos.add(r, size)
-	}
-
-	if r == invalid && err == nil {
-		err = fmt.Errorf("invalid UTF-8 at %v", l.pos)
-	}
-
-	return
-}
-
-func (l *Lexer) posName() string {
-	if named, ok := l.scanner.(NamedReader); ok {
-		if name := named.Name(); name != "" {
-			return name
+func (p *Parser) expect(k token.TokenKind, literal string) token.Token {
+	t := p.tok
+	if t.Kind != k || (literal != "" && lit(t) != literal) {
+		var err error
+		if literal != "" {
+			err = unexpectedf(t, "expected %q (%v)", k, literal)
+		} else {
+			err = unexpectedf(t, "expected %v", k)
 		}
+		p.bailf(err, "error parsing input")
+		panic("unreachable")
 	}
-	return l.Name
+	p.logf("expect: matched %v, advancing", k)
+	p.next() // Advance to next token.
+	return t
 }
 
-// unread takes the last-scanned rune and tells the lexer to return it on the next call to readRune.
-// This can be used to walk back a single readRune call.
-func (l *Lexer) unread() {
-	if l.pending {
-		panic("unread() called with pending rune")
+func isLeading(kind token.TokenKind) bool {
+	return kind == token.Whitespace ||
+		kind == token.Stop ||
+		kind == token.Comment
+}
+
+func (p *Parser) skipLeading() {
+	_ = p.run(isLeading)
+}
+
+func (p *Parser) run(matching func(token.TokenKind) bool) bool {
+	if !matching(p.tok.Kind) {
+		return false
 	}
-	l.pending = true
-}
-
-func (l *Lexer) reset() {
-	l.buf.Reset()
-	l.strbuf.Reset()
-}
-
-func (l *Lexer) buffer(raw, str rune) {
-	if raw >= 0 {
-		l.buf.WriteRune(raw)
+	if p.tok.Kind == token.EOF {
+		return true
 	}
-	if str >= 0 {
-		l.strbuf.WriteRune(str)
+	p.logf("run: matched %v", p.tok.Kind)
+	p.next()
+	for matching(p.tok.Kind) && p.tok.Kind != token.EOF {
+		p.logf("run: matched %v", p.tok.Kind)
+		p.next()
+	}
+	return true
+}
+
+func (p *Parser) stop() bool {
+	return p.run(func(kind token.TokenKind) bool {
+		return kind == token.Stop || kind == token.Comment || kind == token.EOF
+	})
+}
+
+func (p *Parser) ws() bool {
+	return p.run(func(kind token.TokenKind) bool {
+		return kind == token.Whitespace
+	})
+}
+
+// lit returns the literal text of a token (i.e., its raw text, not its
+// evaluated form).
+func lit(t token.Token) string {
+	switch t.Kind {
+	case token.EOF:
+		return ""
+	case token.BracketOpen:
+		return "["
+	case token.BracketClose:
+		return "]"
+	default:
+		return string(t.Raw)
 	}
 }
 
-func (l *Lexer) scanPos() Location {
-	if l.pending {
-		return l.lastPos
+func wordBreak(kind token.TokenKind) bool {
+	switch kind {
+	case token.Comment, token.Stop, token.Whitespace, token.EOF:
+		return true
 	}
-	return l.pos
+	return false
 }
 
-// Rune cases
+// Errors:
 
-var barewordTables = []*unicode.RangeTable{
-	unicode.L, // Letters
-	unicode.M, // Marks
-	unicode.N, // Numbers
-	unicode.P, // Punctuation
-	unicode.S, // Symbols
+func (p *Parser) bailf(err error, format string, args ...any) {
+	if err == nil {
+		return
+	}
+	exitf("%v %s: %+v", p.tok.Start, fmt.Sprintf(format, args...), err)
 }
 
-func isSpace(r rune) bool {
-	return r != rNewline && unicode.IsSpace(r)
+type failure struct {
+	err error
 }
 
-func isWordSep(r rune) bool {
-	return r == eof ||
-		r == rSentinel ||
-		r == rBracketOpen ||
-		r == rBracketClose ||
-		unicode.IsSpace(r)
+var _ error = (*failure)(nil)
+
+func (f *failure) Unwrap() error {
+	return f.err
 }
 
-// Branches
+func (f *failure) Error() string {
+	return fmt.Sprintf("uncaught failure panic: %v", f.err)
+}
 
-type consumerFunc func(rune) (Token, consumerFunc, error)
+func exit(err error) {
+	if err == nil {
+		return
+	}
+	panic(&failure{err: err})
+}
 
-func (l *Lexer) lexSpace(r rune, next consumerFunc) consumerFunc {
-	var spaceConsumer consumerFunc
-	l.buffer(r, -1)
-	spaceConsumer = func(r rune) (Token, consumerFunc, error) {
-		if !isSpace(r) {
-			l.unread()
-			return l.token(TWhitespace, true), next, nil
+func exitf(format string, args ...any) {
+	panic(&failure{err: perrors.WithStack(fmt.Errorf(format, args...))})
+}
+
+var badErrPtr = errors.New("passed nil *error to captureErr")
+
+func captureErr(err *error) {
+	if err == nil {
+		panic(badErrPtr)
+	}
+	switch rc := recover().(type) {
+	case nil:
+	case *failure:
+		if *err != nil {
+			*err = errors.Join(*err, rc.err)
 		}
-		l.buffer(r, -1)
-		return noToken, spaceConsumer, nil
+		*err = rc.err
+	default:
+		panic(rc)
 	}
-	return spaceConsumer
 }
 
-func (l *Lexer) lexComment(next consumerFunc) consumerFunc {
-	var commentConsumer consumerFunc
-	l.buffer(rComment, -1)
-	commentConsumer = func(r rune) (Token, consumerFunc, error) {
-		if r == rNewline || r == eof {
-			l.unread()
-			return l.token(TComment, true), next, nil
-		}
-		l.buffer(r, r)
-		return noToken, commentConsumer, nil
-	}
-	return commentConsumer
+type UnexpectedTokenError struct {
+	Token token.Token
+	Err   error
 }
 
-func (l *Lexer) lexSegment(r rune) (Token, consumerFunc, error) {
-	switch {
-	// EOF
-	case r == eof:
-		return l.token(TEOF, false), l.lexSegment, nil
-
-	case r == rNewline:
-		return l.token(TNewline, false), l.lexSegment, nil
-
-	// Whitespace (word separator)
-	case isSpace(r):
-		return noToken, l.lexSpace(r, l.lexSegment), nil
-
-	// Semicolon (sentinel)
-	case r == rSentinel:
-		return l.token(TSemicolon, false), l.lexSegment, nil
-
-	case r == rEscape:
-		l.buffer(r, -1)
-		return noToken, l.lexEscape, nil
-
-	// {String}
-	case r == rCurlOpen:
-		return l.lexCurlString(r)
-
-	// "String"
-	case r == rDoubleQuote:
-		return l.lexString(r)
-
-	// [ ... ]
-	case r == rBracketOpen:
-		return l.token(TBracketOpen, false), l.lexSegment, nil
-	case r == rBracketClose:
-		return l.token(TBracketClose, false), l.lexSegment, nil
-
-	// Comment (comments may only be found at the start of a segment,
-	// #s are valid inside words)
-	case r == rComment:
-		return noToken, l.lexComment(l.lexSegment), nil
-
-	// Word -- IsGraphic includes spaces, but we're ignoring that because
-	// we capture spaces above.
-	case unicode.IsOneOf(barewordTables, r):
-		return l.lexWord(r)
+func wrapUnexpected(tok token.Token, err error) *UnexpectedTokenError {
+	return &UnexpectedTokenError{
+		Token: tok,
+		Err:   perrors.WithStack(err),
 	}
-
-	return noToken, nil, fmt.Errorf("unexpected character %q at %v", r, l.pos)
 }
 
-func (l *Lexer) lexWord(r rune) (Token, consumerFunc, error) {
-	if r == eof {
-		return l.token(TWord, true), l.lexSegment, nil
-	} else if isWordSep(r) {
-		l.unread()
-		return l.token(TWord, true), l.lexSegment, nil
-	} else if !unicode.IsOneOf(barewordTables, r) {
-		l.unread()
-		return l.token(TWord, true), l.lexSegment, nil
-	}
-
-	l.buffer(r, r)
-	return noToken, l.lexWord, nil
+func unexpected(tok token.Token, msg string) *UnexpectedTokenError {
+	return wrapUnexpected(tok, errors.New(msg))
 }
 
-type stringLexer struct {
-	*Lexer
-
-	stack  []rune
-	escape bool
+func unexpectedf(tok token.Token, format string, args ...any) *UnexpectedTokenError {
+	return wrapUnexpected(tok, fmt.Errorf(format, args...))
 }
 
-func (ls *stringLexer) lex(r rune) (Token, consumerFunc, error) {
-	if r == eof {
-		return noToken, ls.lex, fmt.Errorf("expected closing \" of string: %w", ErrUnexpectedEOF)
+func (e *UnexpectedTokenError) Error() string {
+	raw := lit(e.Token)
+	if raw == "" {
+		return fmt.Sprintf("%v unexpected token %v: %v",
+			e.Token.Start, e.Token.Kind, e.Err)
 	}
-
-	if ls.escape {
-		ls.buffer(r, r)
-		ls.escape = false
-		return noToken, ls.lex, nil
-	}
-
-	if depth := len(ls.stack) - 1; depth >= 0 && ls.stack[depth] == r {
-		ls.buffer(r, r)
-		ls.stack = ls.stack[:depth]
-		return noToken, ls.lex, nil
-	}
-
-	switch r {
-	case rEscape:
-		ls.escape = true
-		ls.buffer(r, r)
-		return noToken, ls.lex, nil
-
-	case rBracketOpen:
-		ls.stack = append(ls.stack, ']')
-
-	case rDoubleQuote:
-		if len(ls.stack) > 0 {
-			ls.stack = append(ls.stack, r)
-			ls.buffer(r, r)
-			return noToken, ls.lex, nil
-		}
-
-		ls.buffer(r, -1)
-		return ls.token(TString, true), ls.Lexer.lexSegment, nil
-	}
-
-	ls.buffer(r, r)
-
-	return noToken, ls.lex, nil
-}
-
-func (l *Lexer) lexString(r rune) (Token, consumerFunc, error) {
-	l.buffer(r, -1)
-	return noToken, (&stringLexer{Lexer: l}).lex, nil
-}
-
-type curlStringLexer struct {
-	*Lexer
-
-	escape bool
-}
-
-func (ls *curlStringLexer) lex(r rune) (Token, consumerFunc, error) {
-	if r == eof {
-		return noToken, ls.lex, fmt.Errorf("expected closing } of string: %w", ErrUnexpectedEOF)
-	}
-
-	if r == rEscape {
-		ls.escape = true
-		ls.buffer(r, r)
-		return noToken, ls.lex, nil
-	}
-
-	if ls.escape {
-		ls.escape = false
-		ls.buffer(r, r)
-		return noToken, ls.lex, nil
-	}
-
-	if r == rCurlClose {
-		ls.buffer(r, -1)
-		return ls.token(TSimpleString, true), ls.Lexer.lexSegment, nil
-	}
-
-	ls.buffer(r, r)
-	return noToken, ls.lex, nil
-}
-
-func (l *Lexer) lexCurlString(r rune) (Token, consumerFunc, error) {
-	l.buffer(r, -1)
-	return noToken, (&curlStringLexer{Lexer: l}).lex, nil
-}
-
-func (l *Lexer) lexEscape(r rune) (Token, consumerFunc, error) {
-	if r == eof {
-		return noToken, l.lexEscape, fmt.Errorf("expected newline or word: %w", ErrUnexpectedEOF)
-	}
-
-	if r == rNewline {
-		return l.token(TContinuation, false), l.lexSegment, nil
-	}
-
-	l.buffer(-1, '\\')
-	l.unread()
-	return noToken, l.lexWord, nil
+	return fmt.Sprintf("%v unexpected token %v %q: %v",
+		e.Token.Start, e.Token.Kind, raw, e.Err)
 }
