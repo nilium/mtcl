@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log"
 	"os"
 
@@ -12,30 +14,46 @@ import (
 func main() {
 	log.SetPrefix("# ")
 	log.SetFlags(0)
+
+	dump := flag.Bool("j", false, "dump JSON")
+	logged := flag.Bool("v", false, "write debug logs")
+	parseOnly := flag.Bool("p", false, "parse without eval")
+	flag.Parse()
+
 	lexer := lexer.NewLexer(os.Stdin)
 	lexer.Name = "stdin"
 
 	parser := mtcl.NewParser(lexer)
-	parser.LogFunc = log.Print
+	if *logged {
+		parser.LogFunc = log.Print
+	}
 	src, err := parser.Parse()
 	if err != nil {
 		log.Fatalf("%+v", err)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(src)
+	if *dump {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(src)
+	}
 
-	// for i, line := range src.Lines {
-	// fmt.Printf("% 3d: %v\n", i+1, line)
-	// }
+	if *parseOnly && *dump {
+		return
+	}
 
-	// interp := mtcl.NewInterp()
-	// _, err = src.Eval(interp)
-	// if err != nil {
-	// panic(err)
-	// }
-	// for _, line := range src.Lines {
-
-	// }
+	interp := mtcl.NewInterp()
+	for _, cmd := range src {
+		line := cmd.Token().Start.Line
+		if *parseOnly {
+			fmt.Printf("%03d: %v\n", line, cmd)
+			continue
+		}
+		vals, err := interp.Do(cmd)
+		if err != nil {
+			fmt.Printf("%03d: %v # ERR => %v\n", line, cmd, err)
+		} else {
+			fmt.Printf("%03d: %v # => %v\n", line, cmd, vals)
+		}
+	}
 }

@@ -18,9 +18,9 @@ type TokenReader interface {
 }
 
 type Parser struct {
-	stack []TokenReader
-	tok   token.Token
-	last  token.Token
+	r    TokenReader
+	tok  token.Token
+	last token.Token
 
 	subexpr bool
 	depth   uint64
@@ -30,7 +30,7 @@ type Parser struct {
 }
 
 func NewParser(r TokenReader) *Parser {
-	return &Parser{stack: []TokenReader{r}}
+	return &Parser{r: r}
 }
 
 func (p *Parser) logf(format string, args ...any) {
@@ -54,6 +54,15 @@ func (p *Parser) inc(sect string) func() {
 
 type Expr interface {
 	Token() token.Token
+	String() string
+}
+
+func strs[E Expr](exprs ...E) []string {
+	vals := make([]string, len(exprs))
+	for i, e := range exprs {
+		vals[i] = e.String()
+	}
+	return vals
 }
 
 // A Block is a set of Commands enclosed in square brackets, such as
@@ -63,6 +72,10 @@ type Block struct {
 
 	StartTok token.Token `json:"-"` // '[' token
 	EndTok   token.Token `json:"-"` // ']' token
+}
+
+func (b *Block) String() string {
+	return "[" + strings.Join(strs(b.Block...), "; ") + "]"
 }
 
 func (b *Block) Token() token.Token {
@@ -77,6 +90,13 @@ type Access struct {
 	Tok    token.Token `json:"-"`
 }
 
+func (a *Access) String() string {
+	if a.Braced {
+		return "${" + a.Access + "}"
+	}
+	return "$" + a.Access
+}
+
 func (a *Access) Token() token.Token {
 	return a.Tok
 }
@@ -85,6 +105,10 @@ func (a *Access) Token() token.Token {
 type Literal struct {
 	Literal string      `json:"literal"`
 	Tok     token.Token `json:"-"`
+}
+
+func (l *Literal) String() string {
+	return l.Literal
 }
 
 func (l *Literal) Token() token.Token {
@@ -98,6 +122,10 @@ type Word struct {
 	Tok  token.Token `json:"-"`
 }
 
+func (w *Word) String() string {
+	return string(w.Token().Raw)
+}
+
 func (w *Word) Token() token.Token {
 	return w.Tok
 }
@@ -106,6 +134,10 @@ func (w *Word) Token() token.Token {
 // of Words, Accesses, and Blocks.
 type QuoteString struct {
 	QuoteString *Word `json:"quote_string"`
+}
+
+func (qs *QuoteString) String() string {
+	return string(qs.Token().Raw)
 }
 
 func (qs *QuoteString) Token() token.Token {
@@ -117,6 +149,13 @@ func (qs *QuoteString) Token() token.Token {
 type RawString struct {
 	RawString string      `json:"raw_string"`
 	Tok       token.Token `json:"-"`
+
+	// Exprs contains parsed commands from the RawString. May be empty if the string cannot be parsed as a set of expressions.
+	Cmds []*Command `json:"cmds"`
+}
+
+func (rs *RawString) String() string {
+	return string(rs.Token().Raw)
 }
 
 func (rs *RawString) Token() token.Token {
@@ -126,6 +165,10 @@ func (rs *RawString) Token() token.Token {
 type Command struct { // Expr+ Stop
 	Command Expr   `json:"command"`
 	Params  []Expr `json:"params"`
+}
+
+func (c *Command) String() string {
+	return c.Command.String() + " " + strings.Join(strs(c.Params...), " ")
 }
 
 func (c *Command) Token() token.Token {
@@ -191,9 +234,28 @@ loop:
 		case token.BracketOpen:
 			parts = append(parts, p.parseBlock())
 		case token.Word:
-			parts = append(parts, p.parseString())
+			word := p.parseString()
+			if len(word.Word) == 1 {
+				parts = append(parts, word.Word[0])
+			} else {
+				parts = append(parts, word)
+			}
 		case token.RawString:
-			parts = append(parts, &RawString{RawString: tok.Value, Tok: tok})
+
+			lexer := lexer.NewLexer(strings.NewReader(tok.Value))
+			lexer.SetPos(tok.Start)
+			cmds := pushWith(p, lexer, func() []*Command {
+				cmds, err := p.Parse()
+				if err != nil {
+					return nil
+				}
+				if cmds == nil {
+					cmds = []*Command{}
+				}
+				return cmds
+			})
+
+			parts = append(parts, &RawString{RawString: tok.Value, Tok: tok, Cmds: cmds})
 			p.next()
 		case token.QuotedString:
 			// Pretending:
@@ -315,7 +377,7 @@ func (p *Parser) parseString() *Word {
 				p.logf("bare access")
 				stop := strings.IndexFunc(str, func(r rune) bool {
 					switch r {
-					case '[', ']', '{', '}', '$', '*', '(', ')', '`', '\'', '"', '\\':
+					case '[', ']', '{', '}', '$', '(', ')', '`', '\'', '"', '\\':
 						return true
 					}
 					return unicode.IsSpace(r)
@@ -412,7 +474,7 @@ func (p *Parser) parseBlock() *Block {
 	}
 
 	cmds := p.parseCommands(func(tk token.TokenKind) bool {
-		return tk == token.BracketClose || (len(p.stack) > 1 && tk == token.EOF)
+		return tk == token.BracketClose
 	})
 	end = p.expect(token.BracketClose, "")
 
@@ -427,32 +489,17 @@ func (p *Parser) parseBlock() *Block {
 
 func pushWith[T any](p *Parser, r TokenReader, fn func() T) T {
 	done := p.inc("nested lexer")
-	p.push(r)
-	defer func(last token.Token) {
-		p.last, p.tok = p.tok, last
-		p.pop()
+	defer func(prev TokenReader, last token.Token) {
+		p.r, p.last, p.tok = prev, p.tok, last
 		done()
-	}(p.tok)
+	}(p.lexer(), p.tok)
+	p.r = r
 	p.next()
 	return fn()
 }
 
 func (p *Parser) lexer() TokenReader {
-	return p.stack[len(p.stack)-1]
-}
-
-func (p *Parser) push(r TokenReader) {
-	p.stack = append(p.stack, r)
-}
-
-func (p *Parser) pop() {
-	top := len(p.stack) - 1
-	if top == 0 {
-		exitf("attempt to pop bottom lexer from stack")
-		return
-	}
-	p.stack[top] = nil
-	p.stack = p.stack[:top]
+	return p.r
 }
 
 func (p *Parser) next() token.TokenKind {
