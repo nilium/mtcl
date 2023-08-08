@@ -123,7 +123,7 @@ type Word struct {
 }
 
 func (w *Word) String() string {
-	return string(w.Token().Raw)
+	return strings.Join(strs(w.Word...), "")
 }
 
 func (w *Word) Token() token.Token {
@@ -168,6 +168,9 @@ type Command struct { // Expr+ Stop
 }
 
 func (c *Command) String() string {
+	if len(c.Params) == 0 {
+		return c.Command.String()
+	}
 	return c.Command.String() + " " + strings.Join(strs(c.Params...), " ")
 }
 
@@ -241,27 +244,10 @@ loop:
 				parts = append(parts, word)
 			}
 		case token.RawString:
-
-			lexer := lexer.NewLexer(strings.NewReader(tok.Value))
-			lexer.SetPos(tok.Start)
-			cmds := pushWith(p, lexer, func() []*Command {
-				cmds, err := p.Parse()
-				if err != nil {
-					return nil
-				}
-				if cmds == nil {
-					cmds = []*Command{}
-				}
-				return cmds
-			})
-
-			parts = append(parts, &RawString{RawString: tok.Value, Tok: tok, Cmds: cmds})
-			p.next()
+			parts = append(parts, p.parseRawString())
 		case token.QuotedString:
 			// Pretending:
-			parts = append(parts, &QuoteString{
-				QuoteString: p.parseString(),
-			})
+			parts = append(parts, &QuoteString{QuoteString: p.parseString()})
 		default:
 			break loop
 		}
@@ -275,6 +261,30 @@ loop:
 	default:
 		return &Word{Word: parts}
 	}
+}
+
+func (p *Parser) parseRawString() *RawString {
+	tok := p.expect(token.RawString, "")
+	lexer := lexer.NewLexer(strings.NewReader(tok.Value))
+	lexer.SetPos(tok.Start)
+	cmds := pushWith(p, lexer, func() []*Command {
+		cmds, err := p.Parse()
+		if err != nil {
+			return nil
+		}
+		if cmds == nil {
+			cmds = []*Command{}
+		}
+		return cmds
+	})
+
+	rs := &RawString{
+		RawString: tok.Value,
+		Tok:       tok,
+		Cmds:      cmds,
+	}
+
+	return rs
 }
 
 func (p *Parser) parseString() *Word {

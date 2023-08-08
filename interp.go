@@ -10,9 +10,71 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-type varTable map[string]*[]string
+type String string
 
-func (vt varTable) set(name string, vals []string) {
+func (String) value()           {}
+func (s String) String() string { return string(s) }
+
+func (String) Type() string {
+	return "string"
+}
+
+func (s String) Expand() Values {
+	return Values{s}
+}
+
+type Values []Value
+
+func (Values) value() {}
+func (vs Values) String() string {
+	switch len(vs) {
+	case 0:
+		return ""
+	case 1:
+		return vs[0].String()
+	default:
+		var out strings.Builder
+		for i, v := range vs {
+			str := v.String()
+			if str == "" {
+				continue
+			}
+			out.Grow(len(str) + 1)
+			if i > 0 && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			out.WriteString(str)
+		}
+		return out.String()
+	}
+}
+
+func (vs Values) Expand() Values {
+	return vs
+}
+
+func (vs Values) Type() string {
+	return "vec"
+}
+
+type Value interface {
+	value()
+
+	String() string
+	Type() string
+	Expand() Values
+}
+
+type Iterable interface {
+	Value
+	Iterator() Iterator
+}
+
+type Iterator func() []Value
+
+type varTable map[string]*Values
+
+func (vt varTable) set(name string, vals Values) {
 	vals = slices.Clone(vals)
 	vp, ok := vt[name]
 	if !ok {
@@ -22,7 +84,7 @@ func (vt varTable) set(name string, vals []string) {
 	}
 }
 
-func (vt varTable) val(name string) ([]string, bool) {
+func (vt varTable) val(name string) (Values, bool) {
 	vp, ok := vt[name]
 	if !ok {
 		return nil, false
@@ -56,15 +118,15 @@ const (
 type Context interface {
 	// Command lookup and calling.
 	Cmd(name string) (Cmd, error)
-	Call(name string, args ...string) ([]string, error)
+	Call(name string, args ...Value) (Values, error)
 	Bind(name string, cmd Cmd)
 
 	// Expression evaluation.
-	Do(expr Expr) (results []string, err error)
+	Do(expr Expr) (results Values, err error)
 
 	// Variable assignment and lookup.
-	SetVar(name string, vals []string)
-	Var(name string) (values []string, err error)
+	SetVar(name string, vals Values)
+	Var(name string) (values Values, err error)
 
 	// Lift variables from a depth or global scope.
 	Upvar(name string, depth uint) error
@@ -85,29 +147,29 @@ var (
 	ErrCmdNotFound = fmt.Errorf("command %w", ErrNotFound)
 )
 
-type CmdFunc func(interp Context, args []string) ([]string, error)
+type CmdFunc func(interp Context, args Values) (Values, error)
 
-func (cmd CmdFunc) Call(interp Context, args []string) ([]string, error) {
+func (cmd CmdFunc) Call(interp Context, args Values) (Values, error) {
 	return cmd(interp, args)
 }
 
-type CmdExprFunc func(interp Context, args []Expr) ([]string, error)
+type CmdExprFunc func(interp Context, args []Expr) (Values, error)
 
-func (cmd CmdExprFunc) Call(interp Context, args []string) ([]string, error) {
+func (cmd CmdExprFunc) Call(interp Context, args Values) (Values, error) {
 	return nil, errors.New("command must be called using CallExpr")
 }
 
-func (cmd CmdExprFunc) CallExpr(interp Context, args []Expr) ([]string, error) {
+func (cmd CmdExprFunc) CallExpr(interp Context, args []Expr) (Values, error) {
 	return cmd(interp, args)
 }
 
 type Cmd interface {
-	Call(interp Context, args []string) ([]string, error)
+	Call(interp Context, args Values) (Values, error)
 }
 
 type CmdExpr interface {
 	Cmd
-	CallExpr(interp Context, args []Expr) ([]string, error)
+	CallExpr(interp Context, args []Expr) (Values, error)
 }
 
 type Interp struct {
@@ -118,7 +180,7 @@ type Interp struct {
 var _ Context = (*Interp)(nil)
 
 // Call implements Context
-func (tr *Interp) Call(name string, args ...string) ([]string, error) {
+func (tr *Interp) Call(name string, args ...Value) (Values, error) {
 	return tr.scope.Call(name, args...)
 }
 
@@ -132,7 +194,7 @@ func (tr *Interp) Bind(name string, cmd Cmd) {
 }
 
 // Do implements Context
-func (tr *Interp) Do(expr Expr) (results []string, err error) {
+func (tr *Interp) Do(expr Expr) (results Values, err error) {
 	return tr.scope.Do(expr)
 }
 
@@ -142,11 +204,11 @@ func (tr *Interp) Global(name string) error {
 }
 
 // SetVar implements Context
-func (tr *Interp) SetVar(name string, vals []string) {
+func (tr *Interp) SetVar(name string, vals Values) {
 	tr.scope.SetVar(name, vals)
 }
 
-func (tr *Interp) Var(name string) (values []string, err error) {
+func (tr *Interp) Var(name string) (values Values, err error) {
 	return tr.scope.Var(name)
 }
 
@@ -171,8 +233,8 @@ func (tr *Interp) GlobalScope() Context {
 	return tr.scope
 }
 
-func doInContext(tcl, scope Context, args []Expr) ([]string, error) {
-	var last []string
+func doInContext(tcl, scope Context, args []Expr) (Values, error) {
+	var last Values
 	var err error
 	for _, arg := range args {
 		cmds, err := commandsFor(tcl, arg)
@@ -191,37 +253,72 @@ func doInContext(tcl, scope Context, args []Expr) ([]string, error) {
 }
 
 var baseCmds = map[string]Cmd{
-	"set": CmdFunc(func(tcl Context, args []string) ([]string, error) {
+	"set": CmdFunc(func(tcl Context, args Values) (Values, error) {
 		switch len(args) {
 		case 0:
 			return nil, errors.New("no arguments given, must have at least var name and zero or more values")
 		case 1:
 			name := args[0]
-			return tcl.Var(name)
+			return tcl.Var(name.String())
 		default:
 			name, vals := args[0], args[1:]
-			tcl.SetVar(name, vals)
+			tcl.SetVar(name.String(), vals)
 			return slices.Clone(vals), nil
 		}
 	}),
-	"puts": CmdFunc(func(tr Context, args []string) ([]string, error) {
-		_, err := fmt.Println(strings.Join(args, "\t"))
-		return nil, err
-	}),
-	"concat": CmdFunc(func(tr Context, args []string) ([]string, error) {
-		return []string{strings.Join(args, " ")}, nil
-	}),
-	"list": CmdFunc(func(tr Context, args []string) ([]string, error) {
-		vals := make([]string, 0, len(args))
+	"...": CmdFunc(func(tcl Context, args Values) (Values, error) {
+		vals := make(Values, 0, len(args))
 		for _, arg := range args {
-			vals = append(vals, strings.Fields(arg)...)
+			vals = append(vals, arg.Expand()...)
 		}
 		return vals, nil
 	}),
-	"upvar": CmdFunc(func(interp Context, args []string) ([]string, error) {
+	"type": CmdFunc(func(tcl Context, args Values) (Values, error) {
+		types := make(Values, len(args))
+		for i, arg := range args {
+			types[i] = String(arg.Type())
+		}
+		return types, nil
+	}),
+	"puts": CmdFunc(func(tr Context, args Values) (Values, error) {
+		_, err := fmt.Println(strings.Join(Strings(args), "\t"))
+		return nil, err
+	}),
+	"concat": CmdFunc(func(tr Context, args Values) (Values, error) {
+		return Values{String(strings.Join(Strings(args), " "))}, nil
+	}),
+	"list": CmdFunc(func(tr Context, args Values) (Values, error) { // Doesn't really do anything.
+		return Values{slices.Clone(args)}, nil
+	}),
+	"nth": CmdFunc(func(tr Context, args Values) (Values, error) {
+		top := args[0]
+		for i, indexVal := range args[1:] {
+			index, err := strconv.Atoi(indexVal.String())
+			if err != nil {
+				return nil, fmt.Errorf("nth: index %q could not be interpreted as an integer: %w", indexVal, err)
+			}
+
+			list, ok := top.(Values)
+			if !ok {
+				if i == 0 {
+					return nil, errors.New("nth: first argument must be a list")
+				}
+				return nil, fmt.Errorf("nth: value at path [%v] must be a list", strings.Join(Strings(args[1:1+i]), "]["))
+			}
+			if index < 0 || index >= len(list) {
+				return nil, fmt.Errorf("nth: index %d out of bounds for list", index)
+			}
+			top = list[index]
+		}
+		if top == nil {
+			return nil, nil
+		}
+		return Values{top}, nil
+	}),
+	"upvar": CmdFunc(func(interp Context, args Values) (Values, error) {
 		return nil, errors.New("unimplemented")
 	}),
-	"uplevel": CmdExprFunc(func(tcl Context, args []Expr) ([]string, error) {
+	"uplevel": CmdExprFunc(func(tcl Context, args []Expr) (Values, error) {
 		var depth uint = 1
 		var exprs = args
 		switch len(args) {
@@ -231,7 +328,7 @@ var baseCmds = map[string]Cmd{
 			if err != nil {
 				return nil, err
 			}
-			val := strings.Join(vals, " ")
+			val := strings.Join(Strings(vals), " ")
 			depth64, err := strconv.ParseUint(val, 10, strconv.IntSize)
 			if err != nil {
 				return nil, fmt.Errorf("uplevel: cannot parse depth %q: %w", val, err)
@@ -248,10 +345,10 @@ var baseCmds = map[string]Cmd{
 		}
 		return doInContext(tcl, scope, exprs)
 	}),
-	"do": CmdExprFunc(func(tcl Context, args []Expr) ([]string, error) {
+	"do": CmdExprFunc(func(tcl Context, args []Expr) (Values, error) {
 		return doInContext(tcl, tcl.Fork(), args)
 	}),
-	"proc": CmdExprFunc(func(tcl Context, args []Expr) ([]string, error) {
+	"proc": CmdExprFunc(func(tcl Context, args []Expr) (Values, error) {
 		names, err := tcl.Do(args[0])
 		if err != nil {
 			return nil, fmt.Errorf("unable to parse proc name: %w", err)
@@ -262,11 +359,14 @@ var baseCmds = map[string]Cmd{
 		}
 		name := names[0] // Name *can* be empty for some reason.
 
-		params, err := tcl.Do(args[1])
+		paramNV, err := tcl.Do(args[1])
 		if err != nil {
 			return nil, fmt.Errorf("unable to parse proc %q parameter names: %w", name, err)
 		}
-		params = strings.Fields(strings.Join(params, " "))
+		params := make([]string, 0, len(paramNV))
+		for _, nv := range paramNV {
+			params = append(params, strings.Fields(nv.String())...)
+		}
 
 		cmds, err := commandsFor(tcl, args[2])
 		if err != nil {
@@ -281,7 +381,7 @@ var baseCmds = map[string]Cmd{
 			vparam, params = params[n], params[:n]
 		}
 
-		proc := func(tcl Context, args []string) (last []string, err error) {
+		proc := func(tcl Context, args Values) (last Values, err error) {
 			argc := len(args)
 			if variadic && argc < n {
 				return nil, fmt.Errorf("%s: expected at least %d arguments, got %d", name, n, argc)
@@ -291,7 +391,7 @@ var baseCmds = map[string]Cmd{
 
 			tcl = tcl.Fork()
 			for i, param := range params {
-				tcl.SetVar(param, []string{args[i]})
+				tcl.SetVar(param, Values{args[i]})
 			}
 			tcl.SetVar(vparam, args[n:])
 
@@ -305,11 +405,11 @@ var baseCmds = map[string]Cmd{
 			}
 			return last, err
 		}
-		tcl.Bind(name, CmdFunc(proc))
+		tcl.Bind(name.String(), CmdFunc(proc))
 
 		return nil, nil
 	}),
-	"return": CmdFunc(func(tcl Context, args []string) ([]string, error) {
+	"return": CmdFunc(func(tcl Context, args Values) (Values, error) {
 		return slices.Clone(args), &Return{Code: ReturnOK}
 	}),
 }
@@ -324,7 +424,7 @@ func commandsFor(tcl Context, e Expr) ([]*Command, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot evaluate expression: %w", err)
 	}
-	lexer := lexer.NewLexer(strings.NewReader(strings.Join(vals, " ")))
+	lexer := lexer.NewLexer(strings.NewReader(strings.Join(Strings(vals), " ")))
 	lexer.SetPos(e.Token().Start)
 	parser := NewParser(lexer)
 	return parser.Parse()
@@ -354,13 +454,13 @@ type interpScope struct {
 	interp *Interp
 }
 
-func (scope *interpScope) Do(e Expr) (result []string, err error) {
+func (scope *interpScope) Do(e Expr) (result Values, err error) {
 	switch e := e.(type) {
 	case *Access:
 		val, err := scope.Var(e.Access)
 		return val, err
 	case *Block:
-		var last []string
+		var last Values
 		var err error
 		for _, cmd := range e.Block {
 			last, err = scope.Do(cmd)
@@ -378,7 +478,7 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 			return nil, errors.New("command name does not evaluate to anything")
 		}
 		name := nameEval[0]
-		cmd, err := scope.Cmd(name)
+		cmd, err := scope.Cmd(name.String())
 		if err != nil {
 			return nil, fmt.Errorf("cannot find command %q: %w", name, err)
 		}
@@ -387,7 +487,7 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 			return ce.CallExpr(scope, slices.Clone(e.Params))
 		}
 
-		args := make([]string, len(nameEval)-1, len(e.Params)+len(nameEval)-1)
+		args := make(Values, len(nameEval)-1, len(e.Params)+len(nameEval)-1)
 		copy(args, nameEval[1:])
 		for i, param := range e.Params {
 			vals, err := scope.Do(param)
@@ -398,7 +498,7 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 		}
 		return cmd.Call(scope, args)
 	case *RawString:
-		return []string{e.RawString}, nil
+		return Values{String(e.RawString)}, nil
 	case *QuoteString:
 		var out strings.Builder
 		for _, chunk := range e.QuoteString.Word {
@@ -406,18 +506,31 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 			if err != nil {
 				return nil, err
 			}
-			for _, val := range vals {
-				if out.Len() > 0 {
+			n := out.Len()
+			for i, val := range vals {
+				str := val.String()
+				if str == "" {
+					continue
+				}
+				out.Grow(len(str) + 1)
+				if out.Len() > n && i > 0 {
 					out.WriteByte(' ')
 				}
-				if val != "" {
-					out.WriteString(val)
-				}
+				out.WriteString(str)
 			}
 		}
-		return []string{out.String()}, nil
+		return Values{String(out.String())}, nil
 	case *Word:
-		var parts []string
+		if len(e.Word) == 0 {
+			return nil, nil
+		} else if len(e.Word) == 1 {
+			if lit, ok := e.Word[0].(*Literal); ok {
+				return Values{String(lit.Literal)}, nil
+			}
+			return scope.Do(e.Word[0])
+		}
+
+		var parts []Value
 		for _, chunk := range e.Word {
 			vals, err := scope.Do(chunk)
 			if err != nil {
@@ -432,13 +545,13 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 			case 1:
 				val := vals[0]
 				for i, part := range parts {
-					parts[i] = part + val
+					parts[i] = String(part.String() + val.String())
 				}
 			default:
-				mul := make([]string, 0, len(parts)*len(vals))
+				mul := make(Values, 0, len(parts)*len(vals))
 				for _, part := range parts {
 					for _, val := range vals {
-						mul = append(mul, part+val)
+						mul = append(mul, String(part.String()+val.String()))
 					}
 				}
 				parts = mul
@@ -446,25 +559,19 @@ func (scope *interpScope) Do(e Expr) (result []string, err error) {
 		}
 		return parts, nil
 	case *Literal:
-		return []string{e.Literal}, nil
+		return Values{String(e.Literal)}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported expression type %T", e)
 	}
 }
 
-func (scope *interpScope) Call(name string, args ...string) ([]string, error) {
-	lits := make([]Literal, 1+len(args))
-	lits[0].Literal = name
-	cmd := Command{
-		Command: &lits[0],
-		Params:  make([]Expr, len(args)),
+func (scope *interpScope) Call(name string, args ...Value) (Values, error) {
+	cmd, err := scope.Cmd(name)
+	if err != nil {
+		return nil, err
 	}
-	for i, arg := range args {
-		lits[i+1].Literal = arg
-		cmd.Params[i] = &lits[i+1]
-	}
-	return scope.Do(&cmd)
+	return cmd.Call(scope, Values(args))
 }
 
 func (scope *interpScope) Fork() Context {
@@ -491,11 +598,11 @@ func (scope *interpScope) Cmd(name string) (Cmd, error) {
 	return nil, ErrCmdNotFound
 }
 
-func (scope *interpScope) SetVar(name string, vals []string) {
+func (scope *interpScope) SetVar(name string, vals Values) {
 	scope.vars.set(name, vals)
 }
 
-func (scope *interpScope) Var(name string) ([]string, error) {
+func (scope *interpScope) Var(name string) (Values, error) {
 	vals, ok := scope.vars.val(name)
 	if ok {
 		return slices.Clone(vals), nil
@@ -562,4 +669,12 @@ func (scope *interpScope) GlobalScope() Context {
 
 func (scope *interpScope) Bind(name string, cmd Cmd) {
 	scope.cmds[name] = cmd
+}
+
+func Strings[Slice ~[]E, E fmt.Stringer](vals Slice) []string {
+	strs := make([]string, len(vals))
+	for i, e := range vals {
+		strs[i] = e.String()
+	}
+	return strs
 }
