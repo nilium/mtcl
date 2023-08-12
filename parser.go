@@ -3,6 +3,7 @@ package mtcl
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -42,13 +43,14 @@ func (p *Parser) logf(format string, args ...any) {
 	)
 }
 
-func (p *Parser) inc(sect string) func() {
+func (p *Parser) inc(sect string, args ...any) func() {
 	depth := p.ldepth
-	p.logf("Start -> %s", sect)
+	desc := fmt.Sprintf(sect, args...)
+	p.logf("Start -> %s", desc)
 	p.ldepth = depth + 1
 	return func() {
 		p.ldepth = depth
-		p.logf("End -> %s", sect)
+		p.logf("End -> %s", desc)
 	}
 }
 
@@ -178,6 +180,22 @@ func (c *Command) Token() token.Token {
 	return c.Command.Token()
 }
 
+func (p *Parser) ParseCommand() (cmd *Command, err error) {
+	defer captureErr(&err)
+	if p.tok.Kind == token.Invalid {
+		p.logf("Grabbing first token (%v)", p.tok)
+		p.next()
+	}
+	p.logf("Starting parser")
+	cmds := p.parseCommands(1, func(tk token.TokenKind) bool {
+		return tk == token.EOF
+	})
+	if len(cmds) == 0 {
+		return nil, io.EOF
+	}
+	return cmds[0], nil
+}
+
 func (p *Parser) Parse() (cmds []*Command, err error) {
 	defer captureErr(&err)
 	if p.tok.Kind == token.Invalid {
@@ -185,17 +203,18 @@ func (p *Parser) Parse() (cmds []*Command, err error) {
 		p.next()
 	}
 	p.logf("Starting parser")
-	return p.parseCommands(func(tk token.TokenKind) bool {
+	return p.parseCommands(-1, func(tk token.TokenKind) bool {
 		return tk == token.EOF
 	}), nil
 }
 
-func (p *Parser) parseCommands(end func(token.TokenKind) bool) (cmds []*Command) {
+func (p *Parser) parseCommands(limit int, end func(token.TokenKind) bool) (cmds []*Command) {
 	defer p.inc("command list")()
 	p.skipLeading()
-	for !end(p.tok.Kind) {
+	for !end(p.tok.Kind) && (limit == -1 || limit > len(cmds)) {
 		p.logf("Parsing command (%v)", p.tok)
 		if cmd := p.parseCommand(); cmd != nil {
+			p.logf("Parsed command: %#+ v", cmd)
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -211,11 +230,15 @@ func (p *Parser) parseCommand() *Command {
 		return nil
 	}
 	p.logf("Parsing name => %v", p.tok)
+	p.stops()
 	cmd := &Command{
 		Command: p.parseExpr(),
 	}
-	for !p.stop() {
+	for {
 		_ = p.ws() // Skip whitespace.
+		if p.stop() {
+			break
+		}
 		p.logf("Parsing param %d => %v", len(cmd.Params), p.tok)
 		param := p.parseExpr()
 		if param == nil {
@@ -483,7 +506,7 @@ func (p *Parser) parseBlock() *Block {
 		}
 	}
 
-	cmds := p.parseCommands(func(tk token.TokenKind) bool {
+	cmds := p.parseCommands(-1, func(tk token.TokenKind) bool {
 		return tk == token.BracketClose
 	})
 	end = p.expect(token.BracketClose, "")
@@ -555,6 +578,7 @@ func (p *Parser) expectOne(kinds ...token.TokenKind) token.Token {
 }
 
 func (p *Parser) expect(k token.TokenKind, literal string) token.Token {
+	defer p.inc("expect(%v, %q)", k, literal)()
 	t := p.tok
 	if t.Kind != k || (literal != "" && lit(t) != literal) {
 		var err error
@@ -578,6 +602,7 @@ func isLeading(kind token.TokenKind) bool {
 }
 
 func (p *Parser) skipLeading() {
+	defer p.inc("skipLeading()")()
 	_ = p.run(isLeading)
 }
 
@@ -598,12 +623,20 @@ func (p *Parser) run(matching func(token.TokenKind) bool) bool {
 }
 
 func (p *Parser) stop() bool {
-	return p.run(func(kind token.TokenKind) bool {
+	defer p.inc("stop()")()
+	kind := p.tok.Kind
+	return kind == token.Stop || kind == token.Comment || kind == token.EOF
+}
+
+func (p *Parser) stops() {
+	defer p.inc("stops()")()
+	p.run(func(kind token.TokenKind) bool {
 		return kind == token.Stop || kind == token.Comment || kind == token.EOF
 	})
 }
 
 func (p *Parser) ws() bool {
+	defer p.inc("ws()")()
 	return p.run(func(kind token.TokenKind) bool {
 		return kind == token.Whitespace
 	})
