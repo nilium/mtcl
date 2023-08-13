@@ -7,245 +7,10 @@ import (
 	"strings"
 
 	"go.spiff.io/mtcl/lexer"
-	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
 
 const UnknownCmd = `*unknown*`
-
-func IsEmpty(val Value) bool {
-	switch val := val.(type) {
-	case String:
-		return len(val) == 0
-	case Values:
-		return len(val) == 0
-	case Map:
-		return len(val) == 0
-	case nil:
-		return true
-	}
-	return false
-}
-
-func Empty() Values {
-	return nil
-}
-
-func EmptyIterator() Iterator {
-	return func(Values) (bool, error) {
-		return false, nil
-	}
-}
-
-type OnceIterable struct {
-	Value
-}
-
-func (o OnceIterable) Iterator() Iterator {
-	if IsEmpty(o.Value) {
-		return EmptyIterator()
-	}
-	return OnceIterator(o.Value)
-}
-
-func OnceIterator(val Value) Iterator {
-	var iter Iterator
-	iter = func(vals Values) (bool, error) {
-		if len(vals) == 0 {
-			return true, nil
-		}
-		iter = func(vals Values) (bool, error) { return false, nil }
-		if len(vals) != 1 {
-			return false, nil
-		}
-		vals[0] = val
-		return true, nil
-	}
-	return func(vals Values) (bool, error) {
-		return iter(vals)
-	}
-}
-
-type String string
-
-func (String) value()           {}
-func (s String) String() string { return string(s) }
-
-func (String) Type() string {
-	return "string"
-}
-
-func (s String) Expand() Values {
-	if s == "" {
-		return nil
-	}
-	return Values{s}
-}
-
-type Error struct {
-	Err error
-}
-
-func (*Error) value() {}
-
-func (e *Error) String() string {
-	return e.Err.Error()
-}
-
-func (e *Error) Error() string {
-	return e.Err.Error()
-}
-
-func (e *Error) Unwrap() error {
-	return e.Err
-}
-
-func (e *Error) Expand() Values {
-	return Values{String(e.Error())}
-}
-
-func (e *Error) Type() string {
-	return "error"
-}
-
-type Values []Value
-
-func (Values) value() {}
-func (vs Values) String() string {
-	switch len(vs) {
-	case 0:
-		return ""
-	case 1:
-		return vs[0].String()
-	default:
-		var out strings.Builder
-		for i, v := range vs {
-			str := v.String()
-			if str == "" {
-				continue
-			}
-			out.Grow(len(str) + 1)
-			if i > 0 && out.Len() > 0 {
-				out.WriteByte(' ')
-			}
-			out.WriteString(str)
-		}
-		return out.String()
-	}
-}
-
-func (vs Values) Expand() Values {
-	return vs
-}
-
-func (vs Values) Type() string {
-	return "vec"
-}
-
-func (vs Values) Iterator() Iterator {
-	return func(vals Values) (bool, error) {
-		if len(vals) == 0 {
-			return len(vs) > 0, nil
-		}
-		if len(vs) < len(vals) {
-			return false, nil
-		}
-		copy(vals, vs)
-		vs = vs[len(vals):]
-		return true, nil
-	}
-}
-
-type Map map[String]Value
-
-func (m Map) value() {}
-
-func (m Map) Type() string {
-	return "dict"
-}
-
-func (m Map) Expand() Values {
-	keys := maps.Keys(m)
-	slices.Sort(keys)
-	values := make(Values, len(keys))
-	for i, key := range keys {
-		ki := i * 2
-		vi := ki + 1
-		values[ki], values[vi] = String(key), m[key]
-	}
-	return values
-}
-
-func (m Map) String() string {
-	items := make([]string, 0, len(m)*2)
-	for k, v := range m {
-		items = append(items, string(k), v.String())
-	}
-	return strings.Join(items, " ")
-}
-
-func (m Map) Iterator() Iterator {
-	keys := maps.Keys(m)
-	slices.Sort(keys)
-	return func(vals Values) (bool, error) {
-		switch len(vals) {
-		case 0:
-			return len(keys) > 0, nil
-		case 1, 2:
-		default:
-			return false, errors.New("map iterator only accepts one or two iterator parameters")
-		}
-		for i, key := range keys {
-			val, ok := m[key]
-			if !ok {
-				continue
-			}
-			keys = keys[i+1:]
-			switch len(vals) {
-			case 2:
-				vals[0], vals[1] = String(key), val
-			case 1:
-				vals[0] = String(key)
-			}
-			return true, nil
-		}
-		keys = nil
-		return false, nil
-	}
-}
-
-type Func struct {
-	Fn    Cmd
-	Binds Values
-}
-
-func (*Func) value()         {}
-func (*Func) String() string { return "func" }
-func (*Func) Type() string   { return "func" }
-
-func (fn *Func) Expand() Values { return Values{fn} }
-
-func (fn *Func) Call(tcl *Interp, args Values) (Values, error) {
-	if len(fn.Binds) > 0 {
-		args = append(append(make(Values, 0, len(args)+len(fn.Binds)), fn.Binds...), args...)
-	}
-	return fn.Fn.Call(tcl, args)
-}
-
-type Value interface {
-	value()
-
-	String() string
-	Type() string
-	Expand() Values
-}
-
-type Iterable interface {
-	Value
-	Iterator() Iterator
-}
-
-type Iterator func(vals Values) (bool, error)
 
 type varTable map[string]*Values
 
@@ -330,24 +95,6 @@ type cmdExpr interface {
 	callExpr(interp *Interp, args []Expr) (Values, error)
 }
 
-func doInContext[Exprs ~[]E, E Expr](exprScope, evalScope *Interp, args Exprs) (last Values, err error) {
-	var cmds []*Command
-	for _, arg := range args {
-		cmds, err = commandsFor(exprScope, arg)
-		if err != nil {
-			return last, err
-		}
-
-		for _, cmd := range cmds {
-			last, err = evalScope.Do(cmd)
-			if err != nil {
-				return last, err
-			}
-		}
-	}
-	return last, err
-}
-
 func commandsFor(tcl *Interp, e Expr) ([]*Command, error) {
 	// Use pre-parsed commands.
 	if rs, ok := e.(*RawString); ok && rs.Cmds != nil {
@@ -392,6 +139,34 @@ func (tcl *Interp) BindCmds(cmds map[string]Cmd) {
 	}
 }
 
+type EvalErrorFunc func(Values, error) (values Values, err error, exit bool)
+
+func (tcl *Interp) Eval(e Expr, lookup *Interp, handleErr EvalErrorFunc) (result Values, err error) {
+	if lookup == nil {
+		lookup = tcl
+	}
+	cmds, err := commandsFor(lookup, e)
+	if err != nil {
+		return nil, fmt.Errorf("eval: cannot parse expression as command(s): %w", err)
+	}
+	if handleErr == nil {
+		handleErr = func(vals Values, err error) (_ Values, _ error, exit bool) {
+			return vals, err, true
+		}
+	}
+	var exit bool
+	for _, cmd := range cmds {
+		result, err = tcl.Do(cmd)
+		if err != nil {
+			result, err, exit = handleErr(result, err)
+			if err != nil || exit {
+				return result, err
+			}
+		}
+	}
+	return result, err
+}
+
 func (tcl *Interp) Do(e Expr) (result Values, err error) {
 	switch e := e.(type) {
 	case *Access:
@@ -414,6 +189,20 @@ func (tcl *Interp) Do(e Expr) (result Values, err error) {
 		return tcl.expandWord(e)
 
 	case *Literal:
+		switch e.Literal {
+		case "true":
+			return Values{True}, nil
+		case "false":
+			return Values{False}, nil
+		case "":
+			return Values{String("")}, nil
+		}
+		if f := e.Literal[0]; len(e.Literal) > 0 && (f == '-' || f == '+' || (f >= '0' && f <= '9')) {
+			var n Int
+			if _, ok := n.SetString(e.Literal, 0); ok {
+				return Values{&n}, nil
+			}
+		}
 		return Values{String(e.Literal)}, nil
 
 	default:

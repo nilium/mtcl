@@ -55,7 +55,13 @@ func (p *Parser) inc(sect string, args ...any) func() {
 }
 
 type Expr interface {
+	// Token returns the token from the first part of the Expr. The
+	// concrete type of the Expr may contain additional tokens identifying
+	// the remaining tokens making up the Expr.
 	Token() token.Token
+	// String returns the Expr as a string that is equivalent in value
+	// to the source tokens (with differences allowed for comments
+	// and whitespace).
 	String() string
 }
 
@@ -255,8 +261,7 @@ func (p *Parser) parseExpr() Expr {
 
 loop:
 	for {
-		tok := p.tok
-		switch tok.Kind {
+		switch p.tok.Kind {
 		case token.BracketOpen:
 			parts = append(parts, p.parseBlock())
 		case token.Word:

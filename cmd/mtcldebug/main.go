@@ -25,14 +25,6 @@ func main() {
 	parseOnly := flag.Bool("p", false, "parse without eval")
 	flag.Parse()
 
-	lexer := lexer.NewLexer(os.Stdin)
-	lexer.Name = "stdin"
-
-	parser := mtcl.NewParser(lexer)
-	if *logged {
-		parser.LogFunc = log.Print
-	}
-
 	interp := mtcl.NewInterp()
 	interp.SetPrelude(mtcl.Prelude())
 
@@ -58,34 +50,63 @@ func main() {
 		return results, err
 	}))
 
-	for {
-		cmd, err := parser.ParseCommand()
-		if err == io.EOF {
-			return
-		} else if err != nil {
-			log.Printf("PARSE ERR: %+v", err)
-		}
-
-		if *dump {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			_ = enc.Encode(cmd)
-		}
-
-		if *parseOnly && *dump {
-			return
-		}
-
-		line := cmd.Token().Start.Line
-		fmt.Printf("%03d: %v\n", line, cmd)
-		if *parseOnly {
-			continue
-		}
-		vals, err := interp.Do(cmd)
-		if err != nil {
-			fmt.Printf("ERR: %v\n", err)
-		} else {
-			fmt.Printf("=> %v\n", vals)
-		}
+	inputs := []string{"-"}
+	if flag.NArg() > 0 {
+		inputs = flag.Args()
 	}
+
+	for _, input := range inputs {
+		r, err := file(input)
+		if err != nil {
+			log.Fatalf("Error reading input %v: %v", input, err)
+		}
+
+		lexer := lexer.NewLexer(r)
+		lexer.Name = "stdin"
+
+		parser := mtcl.NewParser(lexer)
+		if *logged {
+			parser.LogFunc = log.Print
+		}
+
+		for {
+			cmd, err := parser.ParseCommand()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				log.Printf("PARSE ERR: %+v", err)
+			}
+
+			if *dump {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(cmd)
+			}
+
+			if *parseOnly && *dump {
+				break
+			}
+
+			line := cmd.Token().Start.Line
+			fmt.Printf("%03d: %v\n", line, cmd)
+			if *parseOnly {
+				continue
+			}
+			vals, err := interp.Do(cmd)
+			if err != nil {
+				fmt.Printf("ERR: %v\n", err)
+			} else {
+				fmt.Printf("=> %v\n", vals)
+			}
+		}
+
+		r.Close()
+	}
+}
+
+func file(name string) (io.ReadCloser, error) {
+	if name == "-" {
+		return io.NopCloser(os.Stdin), nil
+	}
+	return os.Open(name)
 }

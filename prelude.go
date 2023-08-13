@@ -13,17 +13,36 @@ import (
 )
 
 var baseCmds = map[string]Cmd{
-	"set":           CmdFunc(PreludeSet),
-	"...":           CmdFunc(PreludeExpand),
-	"&":             CmdFunc(PreludeBind),
-	"type":          CmdFunc(PreludeType),
-	"puts":          CmdFunc(PreludePuts),
-	"concat":        CmdFunc(PreludeConcat),
-	"dict":          CmdFunc(PreludeDict),
-	"list":          CmdFunc(PreludeList),
-	".":             CmdFunc(PreludeIndex),
-	"empty?":        CmdFunc(PreludeIsEmpty),
-	"error?":        CmdFunc(PreludeIsError),
+	"set":    CmdFunc(PreludeSet),
+	"...":    CmdFunc(PreludeExpand),
+	"&":      CmdFunc(PreludeBind),
+	"puts":   CmdFunc(PreludePuts),
+	"concat": CmdFunc(PreludeConcat),
+	"dict":   CmdFunc(PreludeDict),
+	"list":   CmdFunc(PreludeList),
+	".":      CmdFunc(PreludeIndex),
+	"empty?": CmdFunc(PreludeIsEmpty),
+	"error?": CmdFunc(PreludeIsError),
+	"len":    CmdFunc(PreludeLen),
+
+	// Types
+	"type": CmdFunc(PreludeType),
+	"int":  CmdFunc(PreludeInt),
+	"str":  CmdFunc(PreludeStr),
+	"seq":  CmdFunc(PreludeSeq),
+
+	// Control structures
+	"catch":   CmdExprFunc(PreludeCatch),
+	"foreach": CmdExprFunc(PreludeForeach),
+	"if":      CmdExprFunc(PreludeIf),
+	"and":     CmdExprFunc(PreludeAnd),
+	"or":      CmdExprFunc(PreludeOr),
+	"not":     CmdFunc(PreludeNot),
+	"true?":   CmdFunc(PreludeIsTrue),
+	"upvar":   CmdFunc(PreludeUpvar),
+	"uplevel": CmdExprFunc(PreludeUplevel),
+
+	// Control flow
 	"break?":        isErrKindFunc(ReturnBreak),
 	"break":         CmdFunc(PreludeBreak),
 	"continue?":     isErrKindFunc(ReturnContinue),
@@ -31,11 +50,14 @@ var baseCmds = map[string]Cmd{
 	"return?":       isErrKindFunc(ReturnOK),
 	"return-error?": isErrKindFunc(ReturnError),
 	"return":        CmdFunc(PreludeReturn),
-	"catch":         CmdExprFunc(PreludeCatch),
-	"foreach":       CmdExprFunc(PreludeForeach),
-	"upvar":         CmdFunc(PreludeUpvar),
-	"uplevel":       CmdExprFunc(PreludeUplevel),
-	"fn":            CmdExprFunc(PreludeFn),
+
+	// Function definition
+	"fn": CmdExprFunc(PreludeFn),
+
+	// Pass-through
+	"true":  CmdFunc(PreludeTrue),
+	"false": CmdFunc(PreludeFalse),
+	"tap":   CmdFunc(PreludeTap),
 }
 
 func Prelude() map[string]Cmd {
@@ -86,14 +108,6 @@ func PreludeBind(tcl *Interp, args Values) (Values, error) {
 		Fn:    cmd,
 		Binds: slices.Clone(args),
 	}}, nil
-}
-
-func PreludeType(tcl *Interp, args Values) (Values, error) {
-	types := make(Values, len(args))
-	for i, arg := range args {
-		types[i] = String(arg.Type())
-	}
-	return types, nil
 }
 
 func PreludePuts(tr *Interp, args Values) (Values, error) {
@@ -148,7 +162,7 @@ func PreludeIndex(tr *Interp, args Values) (Values, error) {
 			} else if index < 0 {
 				index = len(conc) - index
 			} else {
-				return nil, fmt.Errorf(".: index %d must be a positive [1..) or negative integer (..-1]")
+				return nil, fmt.Errorf(".: index %d must be a positive [1..) or negative integer (..-1]", rawIndex)
 			}
 			if index < 0 || index >= len(conc) {
 				return nil, fmt.Errorf(".: index %d out of bounds for list", rawIndex)
@@ -172,9 +186,12 @@ func PreludeIndex(tr *Interp, args Values) (Values, error) {
 }
 
 func PreludeIsEmpty(tcl *Interp, args Values) (Values, error) {
+	if IsEmpty(args) {
+		return Values{String("true")}, nil
+	}
 	out := make(Values, len(args))
 	for i, arg := range args {
-		if !IsEmpty(arg) {
+		if IsEmpty(arg) {
 			out[i] = String("true")
 		} else {
 			out[i] = Empty()
@@ -195,16 +212,89 @@ func PreludeIsError(tcl *Interp, args Values) (Values, error) {
 	return out, nil
 }
 
-func PreludeBreak(tcl *Interp, args Values) (Values, error) {
-	return slices.Clone(args), ReturnBreak
+func PreludeLen(tcl *Interp, args Values) (Values, error) {
+	lens := make(Values, len(args))
+	for i, arg := range args {
+		if arg == nil {
+			lens[i] = NewInt(0)
+		} else {
+			lens[i] = NewInt(arg.Len())
+		}
+	}
+	return lens, nil
 }
 
-func PreludeContinue(tcl *Interp, args Values) (Values, error) {
-	return slices.Clone(args), ReturnContinue
+func PreludeType(tcl *Interp, args Values) (Values, error) {
+	types := make(Values, len(args))
+	for i, arg := range args {
+		types[i] = String(arg.Type())
+	}
+	return types, nil
 }
 
-func PreludeReturn(tcl *Interp, args Values) (Values, error) {
-	return slices.Clone(args), ReturnOK
+func PreludeInt(tcl *Interp, args Values) (Values, error) {
+	out := make(Values, len(args))
+	for i, arg := range args {
+		var n Int
+		str := arg.String()
+		if _, ok := n.SetString(str, 0); !ok {
+			return nil, fmt.Errorf("cannot parse %q as integer", str)
+		}
+		out[i] = &n
+	}
+	return out, nil
+}
+
+func PreludeStr(tcl *Interp, args Values) (Values, error) {
+	out := make(Values, len(args))
+	for i, arg := range args {
+		out[i] = String(arg.String())
+	}
+	return out, nil
+}
+
+func PreludeSeq(tcl *Interp, args Values) (Values, error) {
+	args, err := PreludeInt(tcl, args)
+	if err != nil {
+		return nil, err
+	}
+	var seq *Seq
+	switch len(args) {
+	case 1: // seq start=0 end step=1|-1
+		seq = &Seq{
+			Start: new(Int),
+			End:   args[0].(*Int),
+			Step:  new(Int),
+		}
+		switch seq.End.Sign() {
+		case -1:
+			seq.Start.SetInt64(-1)
+		case 1:
+			seq.Start.SetInt64(1)
+		}
+
+	case 2: // seq start end step=1|-1
+		seq = &Seq{
+			Start: args[0].(*Int),
+			End:   args[1].(*Int),
+			Step:  new(Int),
+		}
+	case 3: // seq start end step
+		seq = &Seq{
+			Start: args[0].(*Int),
+			End:   args[1].(*Int),
+			Step:  args[2].(*Int),
+		}
+		return Values{seq}, nil
+	default:
+		return nil, fmt.Errorf("seq: expected 1..3 arguments, got %d", len(args))
+	}
+	if seq.End.Cmp(&seq.Start.Int) < 0 {
+		seq.Step.SetInt64(-1)
+	} else {
+		seq.Step.SetInt64(1)
+	}
+	return Values{seq}, nil
 }
 
 func PreludeCatch(tcl *Interp, args []Expr) (last Values, err error) {
@@ -322,6 +412,126 @@ foreach:
 	}
 }
 
+func PreludeIf(tcl *Interp, args []Expr) (results Values, err error) {
+	if len(args) < 2 {
+		return nil, errors.New("if: must pass at least one condition and script pair")
+	}
+
+	// Scan structure for validity before evaluating.
+	for args, condNum := args[2:], 1; len(args) > 0; condNum++ {
+		if len(args) < 2 {
+			return nil, errors.New("if: condition missing script")
+		}
+		cond := args[0]
+		args = args[2:]
+		if cond.String() == "else" {
+			if len(args) != 0 {
+				return nil, errors.New("if: else condition must be the last case")
+			}
+		} else if cond.String() == "elseif" {
+			if len(args) == 0 {
+				return nil, errors.New("if: condition missing script")
+			}
+			args = args[1:]
+		} else {
+			return nil, fmt.Errorf("if: unexpected word %q, need elseif or else", cond.String())
+		}
+	}
+
+	cond := func(condNum int) (results Values, err error, next bool) {
+		cond, body := args[0], args[1]
+		args = args[2:]
+		condEval, err := tcl.Eval(cond, tcl, nil)
+		if rc, ok := returnCode(err); ok && rc != 0 {
+			return nil, nil, true
+		} else if err != nil {
+			return nil, fmt.Errorf("if: error evaluating condition %d: %w", condNum, err), false
+		} else if !Truthy(condEval) {
+			return nil, nil, true
+		}
+		results, err = tcl.Eval(body, tcl, nil)
+		return results, err, false
+	}
+
+	condElse := func(condNum int) (results Values, err error, next bool) {
+		var cond, body Expr
+		switch args[0].String() {
+		case "elseif":
+			cond, body, args = args[1], args[2], args[3:]
+			condEval, err := tcl.Eval(cond, tcl, nil)
+			if rc, ok := returnCode(err); ok && rc != 0 {
+				return nil, nil, true
+			} else if err != nil {
+				return nil, fmt.Errorf("if: error evaluating condition %d: %w", condNum, err), false
+			} else if !Truthy(condEval) {
+				return nil, nil, true
+			}
+
+		case "else":
+			body, args = args[1], args[2:]
+
+		default:
+			panic("unreachable")
+		}
+
+		results, err = tcl.Eval(body, tcl, nil)
+		return results, err, false
+	}
+
+	for condNum := 1; len(args) > 0; condNum++ {
+		var next bool
+		results, err, next = cond(condNum)
+		if next == false {
+			return results, err
+		}
+		cond = condElse
+	}
+	return results, nil
+}
+
+func PreludeAnd(tcl *Interp, args []Expr) (last Values, err error) {
+	for _, arg := range args {
+		last, err = tcl.Do(arg)
+		if rc, ok := returnCode(err); ok && rc != 0 {
+			return nil, nil
+		} else if err != nil || !Truthy(last) {
+			return nil, err
+		}
+	}
+	return last, err
+}
+
+func PreludeOr(tcl *Interp, args []Expr) (last Values, err error) {
+	for _, arg := range args {
+		last, err = tcl.Do(arg)
+		if rc, ok := returnCode(err); ok && rc != 0 {
+			last = nil
+			continue
+		} else if err != nil || Truthy(last) {
+			return last, err
+		} else if Truthy(last) {
+			return last, nil
+		}
+	}
+	return nil, nil
+}
+
+func PreludeNot(tcl *Interp, args Values) (Values, error) {
+	out := make(Values, len(args))
+	for i, arg := range args {
+		out[i] = Bool(!Truthy(arg))
+	}
+	return out, nil
+}
+
+func PreludeIsTrue(tcl *Interp, args Values) (Values, error) {
+	out := make(Values, len(args))
+	for i, arg := range args {
+		out[i] = Bool(Truthy(arg))
+	}
+	return out, nil
+}
+
 func PreludeUpvar(tcl *Interp, args Values) (Values, error) {
 	if len(args) == 0 {
 		return nil, errors.New("upvar requires at least 1 argument, got 0")
@@ -336,7 +546,7 @@ func PreludeUpvar(tcl *Interp, args Values) (Values, error) {
 	return nil, nil
 }
 
-func PreludeUplevel(tcl *Interp, args []Expr) (Values, error) {
+func PreludeUplevel(tcl *Interp, args []Expr) (results Values, err error) {
 	var depth uint = 1
 	var exprs = args
 	switch len(args) {
@@ -361,7 +571,25 @@ func PreludeUplevel(tcl *Interp, args []Expr) (Values, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to get scope at depth %d: %w", depth, err)
 	}
-	return doInContext(tcl, evalScope, exprs)
+	for _, expr := range exprs {
+		results, err = evalScope.Eval(expr, evalScope, nil)
+		if err != nil {
+			break
+		}
+	}
+	return results, err
+}
+
+func PreludeBreak(tcl *Interp, args Values) (Values, error) {
+	return slices.Clone(args), ReturnBreak
+}
+
+func PreludeContinue(tcl *Interp, args Values) (Values, error) {
+	return slices.Clone(args), ReturnContinue
+}
+
+func PreludeReturn(tcl *Interp, args Values) (Values, error) {
+	return slices.Clone(args), ReturnOK
 }
 
 func PreludeFn(tcl *Interp, args []Expr) (Values, error) {
@@ -462,6 +690,18 @@ leader:
 	}
 
 	return Values{&Func{Fn: CmdFunc(fn)}}, nil
+}
+
+func PreludeTrue(tcl *Interp, args Values) (Values, error) {
+	return Values{True}, nil
+}
+
+func PreludeFalse(tcl *Interp, args Values) (Values, error) {
+	return Values{False}, nil
+}
+
+func PreludeTap(tcl *Interp, args Values) (Values, error) {
+	return args, nil
 }
 
 func isErrKindFunc(target error) CmdFunc {
