@@ -197,9 +197,9 @@ func (tcl *Interp) Do(e Expr) (result Values, err error) {
 		case "":
 			return Values{String("")}, nil
 		}
-		if f := e.Literal[0]; len(e.Literal) > 0 && (f == '-' || f == '+' || (f >= '0' && f <= '9')) {
+		if f := e.Literal[0]; len(e.Literal) > 0 && (f == '-' || (f >= '0' && f <= '9')) {
 			var n Int
-			if _, ok := n.SetString(e.Literal, 0); ok {
+			if _, ok := n.SetString(e.Literal, 0); ok && n.String() == e.Literal {
 				return Values{&n}, nil
 			}
 		}
