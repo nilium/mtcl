@@ -33,6 +33,7 @@ var baseCmds = map[string]Cmd{
 
 	// Control structures
 	"catch":   CmdExprFunc(PreludeCatch),
+	"while":   CmdExprFunc(PreludeWhile),
 	"foreach": CmdExprFunc(PreludeForeach),
 	"if":      CmdExprFunc(PreludeIf),
 	"and":     CmdExprFunc(PreludeAnd),
@@ -322,6 +323,40 @@ func PreludeCatch(tcl *Interp, args []Expr) (last Values, err error) {
 	return result, nil
 }
 
+func PreludeWhile(tcl *Interp, args []Expr) (results Values, err error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("while: must provide 2 arguments, got %d", len(args))
+	}
+
+while:
+	for cond, body := args[0], args[1]; ; {
+		condResult, err := tcl.Eval(cond, tcl, nil)
+		if err != nil {
+			return results, fmt.Errorf("while: %w", err)
+		}
+
+		if !Truthy(condResult) {
+			return results, nil
+		}
+
+		cmds, err := commandsFor(tcl, body)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse foreach body: %w", err)
+		}
+
+		for _, cmd := range cmds {
+			results, err = tcl.Do(cmd)
+			if isBreak(err) {
+				return results, nil
+			} else if isContinue(err) {
+				continue while
+			} else if err != nil {
+				return results, err
+			}
+		}
+	}
+}
+
 func PreludeForeach(tcl *Interp, args []Expr) (Values, error) {
 	// Look for 'in' keyword
 	inKW, err := tcl.Do(args[1])
@@ -359,11 +394,6 @@ func PreludeForeach(tcl *Interp, args []Expr) (Values, error) {
 		iterable = iterables
 	}
 
-	cmds, err := commandsFor(tcl, args[3])
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse foreach body: %w", err)
-	}
-
 	unwind := make(map[string]Values, len(params))
 	for _, param := range params {
 		vals, _ := tcl.Var(param)
@@ -397,6 +427,11 @@ foreach:
 
 		for i, param := range params {
 			tcl.SetVar(param, Values{buf[i]})
+		}
+
+		cmds, err := commandsFor(tcl, args[3])
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse foreach body: %w", err)
 		}
 
 		for _, cmd := range cmds {
