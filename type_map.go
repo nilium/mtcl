@@ -2,6 +2,7 @@ package mtcl
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"golang.org/x/exp/maps"
@@ -16,20 +17,47 @@ func (m Map) Type() string {
 	return "dict"
 }
 
+func (m Map) Kind() ValueKind {
+	if len(m) == 0 {
+		return DataKind
+	}
+	var maxKind ValueKind
+	for _, v := range m {
+		maxKind = max(maxKind, v.Kind())
+	}
+	return maxKind
+}
+
+func (m Map) Map(mapfn func(Value) (Value, error)) (Value, error) {
+	m = maps.Clone(m)
+	for k, v := range m {
+		v, err := mapfn(v)
+		if err != nil {
+			return nil, fmt.Errorf("error to mapping value of key %q: %w", k, err)
+		}
+		m[k] = v
+	}
+	return m, nil
+}
+
+func (m Map) Convert(kind ValueKind) (Value, error) {
+	return m.Map(func(v Value) (Value, error) {
+		return v.Convert(kind)
+	})
+}
+
 func (m Map) Expand() Values {
 	keys := maps.Keys(m)
 	slices.Sort(keys)
 	values := make(Values, len(keys))
 	for i, key := range keys {
-		ki := i * 2
-		vi := ki + 1
-		values[ki], values[vi] = String(key), m[key]
+		values[i] = Values{key, m[key]}
 	}
 	return values
 }
 
-func (m Map) Len() int {
-	return len(m)
+func (m Map) Len() *Int {
+	return NewInt(len(m))
 }
 
 func (m Map) String() string {

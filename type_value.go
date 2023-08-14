@@ -1,17 +1,103 @@
 package mtcl
 
 import (
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
+
+	"golang.org/x/exp/slices"
 )
+
+func takeError[T Value](value T, err error) Value {
+	if err != nil {
+		return &Error{Err: err}
+	}
+	return value
+}
+
+func orError(val Value) (Value, error) {
+	if err, ok := val.(error); ok {
+		return nil, err
+	}
+	return val, nil
+}
 
 type Value interface {
 	value()
 
-	Len() int
+	Kind() ValueKind
+	Convert(kind ValueKind) (Value, error)
+
 	String() string
 	Type() string
 	Expand() Values
+}
+
+type Mapper interface {
+	Map(tform func(Value) (Value, error)) (Value, error)
+}
+
+type ConversionError struct {
+	Value  Value
+	Target ValueKind
+}
+
+func conversionError(val Value, target ValueKind) *ConversionError {
+	return &ConversionError{Value: val, Target: target}
+}
+
+func (c *ConversionError) Error() string {
+	return fmt.Sprintf("unable to convert %v (%T) to %v", c.Value.Type(), c.Value, c.Target)
+}
+
+// ValueKind denotes the ordinal kind of an arithmetic-supporting value. The
+// higher of two value kinds is the type that both values will be converted
+// to for an operation. Func kind values are not convertible to other
+// kinds. Data, like a string, may not be convertible to an upper type. Bool
+// kinds can always be converted upward. For most operations, bool values are
+// saturating. IntKind may be convertible upwards but accuracy and validity
+// are not guaranteed (for example, the resulting float may become Inf or
+// NaN). Floats are the maximal type at this time.
+//
+// If two values are found to be data or less, some operators may fail.
+//
+// Conversion rules are such that FuncKind and DataKind may return opaque
+// types. Most of the time, DataKind is a string, but may be something
+// that doesn't support most operations (such as a map). If either of these
+// types are converted to and their resulting values implement ArithValue,
+// they *must* perform type checks. If converting to BoolKind, IntKind, or
+// FloatKind, the result must be a Bool, *Int, or Float respectively. Bool,
+// Int, and Float are not required to check the type of their LHS values in
+// arithmetic operations if conversion succeeds.
+type ValueKind int
+
+const (
+	FuncKind ValueKind = iota
+	DataKind
+	BoolKind
+	IntKind
+	FloatKind
+)
+
+func (v ValueKind) String() string {
+	switch v {
+	case DataKind:
+		return "data"
+	case BoolKind:
+		return "bool"
+	case IntKind:
+		return "int"
+	case FloatKind:
+		return "float"
+	}
+	return "invalid"
+}
+
+type LengthValue interface {
+	Value
+
+	Len() *Int
 }
 
 type Values []Value
@@ -45,12 +131,40 @@ func (vs Values) String() string {
 	}
 }
 
+func (vs Values) Map(mapfn func(Value) (Value, error)) (result Value, err error) {
+	vs = slices.Clone(vs)
+	for i, v := range vs {
+		vs[i], err = mapfn(v)
+		if err != nil {
+			return nil, fmt.Errorf("error mapping value %d: %w", i+1, err)
+		}
+	}
+	return vs, nil
+}
+
+func (vs Values) Kind() ValueKind {
+	if len(vs) == 0 {
+		return DataKind
+	}
+	var maxKind ValueKind
+	for _, v := range vs {
+		maxKind = max(maxKind, v.Kind())
+	}
+	return maxKind
+}
+
+func (vs Values) Convert(kind ValueKind) (result Value, err error) {
+	return vs.Map(func(v Value) (Value, error) {
+		return v.Convert(kind)
+	})
+}
+
 func (vs Values) Expand() Values {
 	return vs
 }
 
-func (vs Values) Len() int {
-	return len(vs)
+func (vs Values) Len() *Int {
+	return NewInt(len(vs))
 }
 
 func (vs Values) Type() string {
@@ -119,7 +233,9 @@ func Truthy(val Value) bool {
 	}
 	switch val := val.(type) {
 	case *Int:
-		return val.Sign() != 0
+		return val.Num.Sign() != 0
+	case Float:
+		return float64(val) != 0 && !math.IsNaN(float64(val))
 	case Bool:
 		return bool(val)
 	case String:
@@ -137,8 +253,6 @@ func Truthy(val Value) bool {
 
 func IsEmpty(val Value) bool {
 	switch val := val.(type) {
-	case *Int:
-		return false
 	case String:
 		return len(val) == 0
 	case Values:

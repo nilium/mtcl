@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -18,18 +19,38 @@ var baseCmds = map[string]Cmd{
 	"&":      CmdFunc(PreludeBind),
 	"puts":   CmdFunc(PreludePuts),
 	"concat": CmdFunc(PreludeConcat),
-	"dict":   CmdFunc(PreludeDict),
-	"list":   CmdFunc(PreludeList),
 	".":      CmdFunc(PreludeIndex),
+	"nth":    CmdFunc(PreludeNth),
 	"empty?": CmdFunc(PreludeIsEmpty),
-	"error?": CmdFunc(PreludeIsError),
 	"len":    CmdFunc(PreludeLen),
+	"car":    CmdFunc(PreludeHead),
+	"cdr":    CmdFunc(PreludeTail),
 
 	// Types
-	"type": CmdFunc(PreludeType),
-	"int":  CmdFunc(PreludeInt),
-	"str":  CmdFunc(PreludeStr),
-	"seq":  CmdFunc(PreludeSeq),
+	"error?": CmdFunc(PreludeIsError),
+	"type":   CmdFunc(PreludeType),
+	"int":    CmdFunc(PreludeInt),
+	"float":  CmdFunc(PreludeFloat),
+	"str":    CmdFunc(PreludeStr),
+	"seq":    CmdFunc(PreludeSeq),
+	"list":   CmdFunc(PreludeList),
+	"dict":   CmdFunc(PreludeDict),
+
+	// Arithmetic
+	"+":   CmdFunc(PreludeAdd),
+	"-":   CmdFunc(PreludeSub),
+	"*":   CmdFunc(PreludeMul),
+	"/":   CmdFunc(PreludeDiv),
+	"pow": CmdFunc(PreludePow),
+	"mod": CmdFunc(PreludeMod),
+
+	// Comparisons
+	"<":  CmdFunc(PreludeLesser),
+	"=<": CmdFunc(PreludeLesserEqual),
+	">":  CmdFunc(PreludeGreater),
+	">=": CmdFunc(PreludeGreaterEqual),
+	"==": CmdFunc(PreludeEqual),
+	"<>": CmdFunc(PreludeNotEqual),
 
 	// Control structures
 	"catch":   CmdExprFunc(PreludeCatch),
@@ -72,11 +93,35 @@ func PreludeSet(tcl *Interp, args Values) (Values, error) {
 	case 1:
 		name := args[0]
 		return tcl.Var(name.String())
-	default:
+	}
+
+	multi := args[0].String() == "-multi"
+	if multi {
+		args = args[1:]
+	}
+
+	if args[0].String() == "--" {
+		args = args[1:]
+	}
+
+	if !multi {
 		name, vals := args[0], args[1:]
 		tcl.SetVar(name.String(), vals)
 		return slices.Clone(vals), nil
 	}
+
+	if len(args)%2 != 0 {
+		return nil, fmt.Errorf("set: must pass matched name-value pairs for set -multi, got uneven number of arguments %d", len(args))
+	}
+
+	var last Value
+	for len(args) >= 2 {
+		name, value := args[0], args[1]
+		args = args[2:]
+		tcl.SetVar(name.String(), Values{value})
+		last = value
+	}
+	return Values{last}, nil
 }
 
 func PreludeExpand(tcl *Interp, args Values) (Values, error) {
@@ -127,25 +172,51 @@ func PreludeConcat(tr *Interp, args Values) (Values, error) {
 	return Values{String(strings.Join(fs.Args(), *sep))}, nil
 }
 
-func PreludeDict(tcl *Interp, args Values) (Values, error) { // Doesn't really do anything.
-	n := len(args)
-	if n%2 != 0 {
-		return nil, errors.New("dict: expected arguments of the form dict key pair")
+func toIndex(tcl *Interp, length int, val Value) (int, error) {
+	if length == 0 {
+		return 0, errors.New("cannot index empty list")
 	}
-	dict := make(Map, n/2)
-	for len(args) > 0 {
-		k, v := String(args[0].String()), args[1]
-		args = args[2:]
-		dict[k] = v
+	idxConv, err := PreludeInt(tcl, Values{val})
+	if err != nil {
+		return 0, fmt.Errorf("index %q could not be interpreted as an integer: %w", val, err)
 	}
-	return Values{dict}, nil
+	iv := idxConv[0].(IntValue) // Guranteed if idxConv PreludeInt returns.
+	idxRaw := iv.IntValue()
+	if !idxRaw.Num.IsInt64() {
+		return 0, fmt.Errorf("index %q could not be interpreted as an integer index", val)
+	}
+	idx64 := idxRaw.Num.Int64()
+	if idx64 > math.MaxInt {
+		return 0, fmt.Errorf("index %q exceeds the maximum index %d", val, math.MaxInt)
+	}
+
+	index := int(idx64)
+	rawIndex := index
+	if index > 0 {
+		index = index - 1
+	} else if index < 0 {
+		index = length + index
+	} else {
+		return 0, fmt.Errorf("index %d must be a positive [1..) or negative integer (..-1]", rawIndex)
+	}
+	if index < 0 || index >= length {
+		return 0, fmt.Errorf("index %d out of bounds [1:%d]", rawIndex, length)
+	}
+	return index, nil
 }
 
-func PreludeList(tcl *Interp, args Values) (Values, error) {
-	return Values{slices.Clone(args)}, nil
+func PreludeNth(tcl *Interp, args Values) (Values, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	index, err := toIndex(tcl, len(args)-1, args[0])
+	if err != nil {
+		return nil, fmt.Errorf("nth: %w", err)
+	}
+	return Values{args[1+index]}, nil
 }
 
-func PreludeIndex(tr *Interp, args Values) (Values, error) {
+func PreludeIndex(tcl *Interp, args Values) (Values, error) {
 	top := args[0]
 	path := func(i int) string {
 		return `[` + strings.Join(Strings(args[1:1+i]), `][`) + `]`
@@ -153,20 +224,9 @@ func PreludeIndex(tr *Interp, args Values) (Values, error) {
 	for i, indexVal := range args[1:] {
 		switch conc := top.(type) {
 		case Values:
-			index, err := strconv.Atoi(indexVal.String())
+			index, err := toIndex(tcl, len(conc), indexVal)
 			if err != nil {
-				return nil, fmt.Errorf(".: index %q could not be interpreted as an integer: %w", indexVal, err)
-			}
-			rawIndex := index
-			if index > 0 {
-				index = index - 1
-			} else if index < 0 {
-				index = len(conc) - index
-			} else {
-				return nil, fmt.Errorf(".: index %d must be a positive [1..) or negative integer (..-1]", rawIndex)
-			}
-			if index < 0 || index >= len(conc) {
-				return nil, fmt.Errorf(".: index %d out of bounds for list", rawIndex)
+				return nil, fmt.Errorf("nth: %w", err)
 			}
 			top = conc[index]
 
@@ -201,101 +261,30 @@ func PreludeIsEmpty(tcl *Interp, args Values) (Values, error) {
 	return out, nil
 }
 
-func PreludeIsError(tcl *Interp, args Values) (Values, error) {
-	out := make(Values, len(args))
-	for i, arg := range args {
-		if _, ok := arg.(error); ok {
-			out[i] = arg
-		} else {
-			out[i] = Empty()
-		}
-	}
-	return out, nil
-}
-
 func PreludeLen(tcl *Interp, args Values) (Values, error) {
 	lens := make(Values, len(args))
 	for i, arg := range args {
-		if arg == nil {
-			lens[i] = NewInt(0)
+		if vlen, ok := arg.(LengthValue); ok {
+			lens[i] = vlen.Len()
 		} else {
-			lens[i] = NewInt(arg.Len())
+			lens[i] = NewInt(len(arg.String()))
 		}
 	}
 	return lens, nil
 }
 
-func PreludeType(tcl *Interp, args Values) (Values, error) {
-	types := make(Values, len(args))
-	for i, arg := range args {
-		types[i] = String(arg.Type())
+func PreludeHead(tcl *Interp, args Values) (Values, error) {
+	if len(args) == 0 {
+		return nil, nil
 	}
-	return types, nil
+	return args[:1], nil
 }
 
-func PreludeInt(tcl *Interp, args Values) (Values, error) {
-	out := make(Values, len(args))
-	for i, arg := range args {
-		var n Int
-		str := arg.String()
-		if _, ok := n.SetString(str, 0); !ok {
-			return nil, fmt.Errorf("cannot parse %q as integer", str)
-		}
-		out[i] = &n
+func PreludeTail(tcl *Interp, args Values) (Values, error) {
+	if len(args) < 2 {
+		return nil, nil
 	}
-	return out, nil
-}
-
-func PreludeStr(tcl *Interp, args Values) (Values, error) {
-	out := make(Values, len(args))
-	for i, arg := range args {
-		out[i] = String(arg.String())
-	}
-	return out, nil
-}
-
-func PreludeSeq(tcl *Interp, args Values) (Values, error) {
-	args, err := PreludeInt(tcl, args)
-	if err != nil {
-		return nil, err
-	}
-	var seq *Seq
-	switch len(args) {
-	case 1: // seq start=0 end step=1|-1
-		seq = &Seq{
-			Start: new(Int),
-			End:   args[0].(*Int),
-			Step:  new(Int),
-		}
-		switch seq.End.Sign() {
-		case -1:
-			seq.Start.SetInt64(-1)
-		case 1:
-			seq.Start.SetInt64(1)
-		}
-
-	case 2: // seq start end step=1|-1
-		seq = &Seq{
-			Start: args[0].(*Int),
-			End:   args[1].(*Int),
-			Step:  new(Int),
-		}
-	case 3: // seq start end step
-		seq = &Seq{
-			Start: args[0].(*Int),
-			End:   args[1].(*Int),
-			Step:  args[2].(*Int),
-		}
-		return Values{seq}, nil
-	default:
-		return nil, fmt.Errorf("seq: expected 1..3 arguments, got %d", len(args))
-	}
-	if seq.End.Cmp(&seq.Start.Int) < 0 {
-		seq.Step.SetInt64(-1)
-	} else {
-		seq.Step.SetInt64(1)
-	}
-	return Values{seq}, nil
+	return args[1:], nil
 }
 
 func PreludeCatch(tcl *Interp, args []Expr) (last Values, err error) {
@@ -647,10 +636,10 @@ leader:
 		args = args[1:]
 	}
 
-	named := len(args) == 3
+	bound := len(args) == 3
 	var name Value = String("<anonymous fn>")
 
-	if named {
+	if bound {
 		names, err := tcl.Do(args[0])
 		if err != nil {
 			return nil, fmt.Errorf("unable to parse fn name: %w", err)
@@ -717,10 +706,13 @@ leader:
 		if isReturn(err) {
 			err = nil
 		}
+		if err != nil {
+			err = fmt.Errorf("%s: %w", name, err)
+		}
 		return last, err
 	}
 
-	if named {
+	if bound {
 		fnScope.Bind(name.String(), CmdFunc(fn))
 	}
 

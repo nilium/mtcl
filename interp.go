@@ -200,10 +200,21 @@ func (tcl *Interp) Do(e Expr) (result Values, err error) {
 		case "":
 			return Values{String("")}, nil
 		}
-		if f := e.Literal[0]; len(e.Literal) > 0 && (f == '-' || (f >= '0' && f <= '9')) {
+		if f := e.Literal[0]; len(e.Literal) > 0 && (f == '-' || f == '+' || f == '.' || (f >= '0' && f <= '9')) {
 			var n Int
-			if _, ok := n.SetString(e.Literal, 0); ok && n.String() == e.Literal {
-				return Values{&n}, nil
+			if f == '.' {
+				// Fall through to float.
+			} else if _, ok := n.Num.SetString(e.Literal, 0); ok {
+				return Values{LitInt{
+					Int:     &n,
+					Literal: e,
+				}}, nil
+			}
+			if f, err := strconv.ParseFloat(e.Literal, 64); err == nil {
+				return Values{LitFloat{
+					Float:   Float(f),
+					Literal: e,
+				}}, nil
 			}
 		}
 		return Values{String(e.Literal)}, nil

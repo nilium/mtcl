@@ -9,12 +9,23 @@ func (*Func) value()         {}
 func (*Func) String() string { return "func" }
 func (*Func) Type() string   { return "func" }
 
+func (fn *Func) Kind() ValueKind {
+	return FuncKind
+}
+
+func (fn *Func) Convert(kind ValueKind) (Value, error) {
+	if kind == FuncKind {
+		return fn, nil
+	}
+	return nil, conversionError(fn, kind)
+}
+
 func (fn *Func) Expand() Values {
 	return Values{fn}
 }
 
-func (*Func) Len() int {
-	return 1
+func (*Func) Len() *Int {
+	return NewInt(1)
 }
 
 func (fn *Func) Call(tcl *Interp, args Values) (Values, error) {
