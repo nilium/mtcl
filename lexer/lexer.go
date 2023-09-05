@@ -42,6 +42,8 @@ const (
 	rSemicolon    = ';'
 	rCurlOpen     = '{'
 	rCurlClose    = '}'
+	rParenOpen    = '('
+	rParenClose   = ')'
 	rBracketOpen  = '['
 	rBracketClose = ']'
 	rDoubleQuote  = '"'
@@ -157,6 +159,8 @@ func (l *Lexer) valueToken(kind TokenKind, convert convertFunc) (tok Token, err 
 var (
 	rawBracketOpen  = []byte{rBracketOpen}
 	rawBracketClose = []byte{rBracketClose}
+	rawParenOpen    = []byte{rParenOpen}
+	rawParenClose   = []byte{rParenClose}
 	rawNewline      = []byte{rNewline}   // Stop
 	rawSemicolon    = []byte{rSemicolon} // Stop
 )
@@ -174,6 +178,10 @@ func (l *Lexer) token(kind TokenKind, takeBuffer bool) Token {
 			txt = rawBracketOpen
 		case BracketClose:
 			txt = rawBracketClose
+		case ParenOpen:
+			txt = rawParenOpen
+		case ParenClose:
+			txt = rawParenClose
 		}
 	}
 	l.buf.Reset()
@@ -275,6 +283,8 @@ func isWordSep(r rune) bool {
 		r == rSemicolon ||
 		r == rBracketOpen ||
 		r == rBracketClose ||
+		r == rParenOpen ||
+		r == rParenClose ||
 		r == rDoubleQuote ||
 		unicode.IsSpace(r)
 }
@@ -312,52 +322,60 @@ func (l *Lexer) lexComment(next consumerFunc) consumerFunc {
 }
 
 func (l *Lexer) lexSegment(r rune) (Token, consumerFunc, error) {
-	switch {
+	switch r {
 	// EOF
-	case r == eof:
+	case eof:
 		return l.token(EOF, false), l.lexSegment, nil
 
 	// Newline (stop)
-	case r == rNewline:
+	case rNewline:
 		l.buffer(r, -1)
 		return l.token(Stop, true), l.lexSegment, nil
 
-	// Whitespace (word separator)
-	case isSpace(r):
-		return noToken, l.lexSpace(r, l.lexSegment), nil
-
 	// Semicolon (stop)
-	case r == rSemicolon:
+	case rSemicolon:
 		l.buffer(r, -1)
 		return l.token(Stop, true), l.lexSegment, nil
 
 	// Escape -- may lead into continuation or word.
-	case r == rEscape:
+	case rEscape:
 		l.buffer(r, -1)
 		return noToken, l.lexEscape, nil
 
 	// {String}
-	case r == rCurlOpen:
+	case rCurlOpen:
 		return l.lexCurlyString(r)
 
 	// "String"
-	case r == rDoubleQuote:
+	case rDoubleQuote:
 		return l.lexString(r)
 
+	// ( ... )
+	case rParenOpen:
+		return l.token(ParenOpen, false), l.lexSegment, nil
+	case rParenClose:
+		return l.token(ParenClose, false), l.lexSegment, nil
+
 	// [ ... ]
-	case r == rBracketOpen:
+	case rBracketOpen:
 		return l.token(BracketOpen, false), l.lexSegment, nil
-	case r == rBracketClose:
+	case rBracketClose:
 		return l.token(BracketClose, false), l.lexSegment, nil
 
 	// Comment (comments may only be found at the start of a segment,
 	// #s are valid inside words)
-	case r == rComment:
+	case rComment:
 		return noToken, l.lexComment(l.lexSegment), nil
+	}
+
+	// Whitespace (word separator)
+	if isSpace(r) {
+		return noToken, l.lexSpace(r, l.lexSegment), nil
+	}
 
 	// Word -- IsGraphic includes spaces, but we're ignoring that because
 	// we capture spaces above.
-	case unicode.IsOneOf(barewordTables, r):
+	if unicode.IsOneOf(barewordTables, r) {
 		return l.lexWord(r)
 	}
 
@@ -411,6 +429,11 @@ func (ls *stringLexer) lex(r rune) (Token, consumerFunc, error) {
 
 	case rBracketOpen:
 		ls.stack = append(ls.stack, rBracketClose)
+
+	case rParenOpen:
+		if len(ls.stack) > 0 {
+			ls.stack = append(ls.stack, rParenClose)
+		}
 
 	case rDoubleQuote:
 		if len(ls.stack) > 0 {

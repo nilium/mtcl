@@ -30,6 +30,8 @@ const (
 	Stop         // ';' | '\n'
 	BracketOpen  // '['
 	BracketClose // ']'
+	ParenOpen    // '('
+	ParenClose   // ')'
 	QuotedString // '"' ( Escape | [^"] )* '"'
 	RawString    // '{' ( Escape | [^}] )* '}'
 )
@@ -47,6 +49,8 @@ var tokenNames = []string{
 	Stop:         "stop",
 	BracketOpen:  "open bracket",
 	BracketClose: "close bracket",
+	ParenOpen:    "open paren",
+	ParenClose:   "close paren",
 
 	QuotedString: `quoted string`,
 	RawString:    "raw string",

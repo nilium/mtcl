@@ -173,6 +173,9 @@ func (tcl *Interp) Do(e Expr) (result Values, err error) {
 		val, err := tcl.Var(e.Access)
 		return val, err
 
+	case *ListExpr:
+		return tcl.expandList(e)
+
 	case *Block:
 		return tcl.expandBlock(e)
 
@@ -208,6 +211,18 @@ func (tcl *Interp) Do(e Expr) (result Values, err error) {
 	default:
 		return nil, fmt.Errorf("unsupported expression type %T", e)
 	}
+}
+
+func (tcl *Interp) expandList(e *ListExpr) (Values, error) {
+	vals := make(Values, 0, len(e.List))
+	for i, sub := range e.List {
+		subvals, err := tcl.Do(sub)
+		if err != nil {
+			return nil, fmt.Errorf("cannot evaluate list expression %d: %w", i+1, err)
+		}
+		vals = append(vals, subvals...)
+	}
+	return Values{vals}, nil
 }
 
 func (tcl *Interp) expandBlock(e *Block) (Values, error) {

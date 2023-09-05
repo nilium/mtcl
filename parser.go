@@ -73,6 +73,24 @@ func strs[E Expr](exprs ...E) []string {
 	return vals
 }
 
+// A ListExpr is a sequence of expressions that results in a list. This is
+// functionally equivalent to calling [list exprs...] in the source script,
+// assuming [list] is provided..
+type ListExpr struct {
+	List []Expr `json:"list"`
+
+	StartTok token.Token `json:"-"` // '(' token
+	EndTok   token.Token `json:"-"` // ')' token
+}
+
+func (l *ListExpr) String() string {
+	return "(" + strings.Join(strs(l.List...), " ") + ")"
+}
+
+func (l *ListExpr) Token() token.Token {
+	return l.StartTok
+}
+
 // A Block is a set of Commands enclosed in square brackets, such as
 // `[concat a b]`.
 type Block struct {
@@ -236,23 +254,29 @@ func (p *Parser) parseCommand() *Command {
 		return nil
 	}
 	p.logf("Parsing name => %v", p.tok)
-	p.stops()
+	p.stopsCommand()
+	cmdExpr := p.parseExpr()
+	params := p.parseExprSeq(nil, p.stopCommand, p.ws)
 	cmd := &Command{
-		Command: p.parseExpr(),
-	}
-	for {
-		_ = p.ws() // Skip whitespace.
-		if p.stop() {
-			break
-		}
-		p.logf("Parsing param %d => %v", len(cmd.Params), p.tok)
-		param := p.parseExpr()
-		if param == nil {
-			break
-		}
-		cmd.Params = append(cmd.Params, param)
+		Command: cmdExpr,
+		Params:  params,
 	}
 	return cmd
+}
+
+func (p *Parser) parseExprSeq(exprs []Expr, stop, skip func() bool) []Expr {
+	for {
+		_ = skip() // Skip.
+		if stop() {
+			return exprs
+		}
+		p.logf("Parsing possible expr %d => %v", len(exprs), p.tok)
+		param := p.parseExpr()
+		if param == nil {
+			return exprs
+		}
+		exprs = append(exprs, param)
+	}
 }
 
 func (p *Parser) parseExpr() Expr {
@@ -262,6 +286,8 @@ func (p *Parser) parseExpr() Expr {
 loop:
 	for {
 		switch p.tok.Kind {
+		case token.ParenOpen:
+			parts = append(parts, p.parseList())
 		case token.BracketOpen:
 			parts = append(parts, p.parseBlock())
 		case token.Word:
@@ -496,6 +522,30 @@ func (p *Parser) parseString() *Word {
 	return word
 }
 
+func (p *Parser) parseList() *ListExpr {
+	defer p.inc("(list)")()
+	start := p.expect(token.ParenOpen, "")
+	p.logf("Parsing list => %v", start)
+	p.skipLeading()
+
+	end, empty := p.maybe(token.ParenClose)
+	if empty {
+		p.logf("Empty list expression")
+		return &ListExpr{
+			StartTok: start,
+			EndTok:   end,
+		}
+	}
+
+	list := &ListExpr{
+		List:     p.parseExprSeq(nil, p.stopList, p.skipList),
+		StartTok: start,
+	}
+	list.EndTok = p.expect(token.ParenClose, "")
+
+	return list
+}
+
 func (p *Parser) parseBlock() *Block {
 	defer p.inc("[block]")()
 	start := p.expect(token.BracketOpen, "")
@@ -627,14 +677,29 @@ func (p *Parser) run(matching func(token.TokenKind) bool) bool {
 	return true
 }
 
-func (p *Parser) stop() bool {
-	defer p.inc("stop()")()
+func (p *Parser) skipList() (ok bool) {
+	defer p.inc("skipList()")()
+	return p.run(func(kind token.TokenKind) bool {
+		return kind == token.Whitespace ||
+			kind == token.Stop ||
+			kind == token.Comment
+	})
+}
+
+func (p *Parser) stopList() bool {
+	defer p.inc("stopList()")()
+	kind := p.tok.Kind
+	return kind == token.ParenClose || kind == token.EOF
+}
+
+func (p *Parser) stopCommand() bool {
+	defer p.inc("stopCommand()")()
 	kind := p.tok.Kind
 	return kind == token.Stop || kind == token.Comment || kind == token.EOF
 }
 
-func (p *Parser) stops() {
-	defer p.inc("stops()")()
+func (p *Parser) stopsCommand() {
+	defer p.inc("stopsCommand()")()
 	p.run(func(kind token.TokenKind) bool {
 		return kind == token.Stop || kind == token.Comment || kind == token.EOF
 	})
