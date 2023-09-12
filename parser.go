@@ -741,7 +741,7 @@ func (p *Parser) bailf(err error, format string, args ...any) {
 	if err == nil {
 		return
 	}
-	exitf("%v %s: %+v", p.tok.Start, fmt.Sprintf(format, args...), err)
+	exitf("%v %s: %w", p.tok.Start, fmt.Sprintf(format, args...), err)
 }
 
 type failure struct {
@@ -815,4 +815,8 @@ func (e *UnexpectedTokenError) Error() string {
 	}
 	return fmt.Sprintf("%v unexpected token %v %q: %v",
 		e.Token.Start, e.Token.Kind, raw, e.Err)
+}
+
+func (e *UnexpectedTokenError) Unwrap() error {
+	return e.Err
 }
