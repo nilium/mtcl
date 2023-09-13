@@ -607,7 +607,7 @@ func PreludeUplevel(tcl *Interp, args []Expr) (results Values, err error) {
 		return nil, fmt.Errorf("unable to get scope at depth %d: %w", depth, err)
 	}
 	for _, expr := range exprs {
-		results, err = evalScope.Eval(expr, evalScope, nil)
+		results, err = evalScope.Eval(expr, tcl, nil)
 		if err != nil {
 			break
 		}
